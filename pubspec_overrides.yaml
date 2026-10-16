@@ -1,0 +1,13 @@
+dependency_overrides:
+  vrlizate_world:
+    path: ../vrlizate_world
+  vrlizate_scene:
+    path: ../vrlizate_scene
+  vrlizate:
+    path: ../vrlizate
+  vrlizate_widgets:
+    path: ../vrlizate_widgets
+  vrlizate_physics:
+    path: ../vrlizate_physics
+  vrlizate_spatial_audio:
+    path: ../vrlizate_spatial_audio
