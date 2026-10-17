@@ -1,7 +1,9 @@
 name: vrlizate_apps
 description: Versioned VRlizate packages, local discovery, HTTPS catalogs, and library coordination.
-version: 0.1.0
-publish_to: none
+version: 1.0.0
+homepage: https://github.com/Open-Neom/vrlizate_apps
+repository: https://github.com/Open-Neom/vrlizate_apps
+issue_tracker: https://github.com/Open-Neom/vrlizate_apps/issues
 environment:
   sdk: ^3.10.8
   flutter: '>=3.47.0'
@@ -14,8 +16,8 @@ dependencies:
   archive: 4.3.0
   crypto: ^3.0.7
   http: ^1.6.0
-  vrlizate_world: ^0.1.0
-  vrlizate_scene: ^0.5.0
+  vrlizate_world: ^1.0.0
+  vrlizate_scene: ^1.0.0
   vrlizate: ^1.13.0
 dev_dependencies:
   flutter_test:

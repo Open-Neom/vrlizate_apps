@@ -2,13 +2,13 @@
 
 Contenedor y validación de paquetes `.vrlz`, descubrimiento en directorio local, catálogos HTTPS y transporte por rangos de lugares `.vrlw` para **VRlizate**.
 
-> Versión actual: **0.1.0**. Consulta [CHANGELOG.md](CHANGELOG.md) y la [especificación `.vrlz`](doc/vrlz_format.md).
+> Versión actual: **1.0.0**. Consulta [CHANGELOG.md](CHANGELOG.md) y la [especificación `.vrlz`](doc/vrlz_format.md).
 
 ## Puntos de entrada
 
 | Librería | Responsabilidad |
 | --- | --- |
-| `vrlizate_apps.dart` | Modelos `.vrlz`, manifiestos, cargadores HTTPS e índices `catalog.json`. |
+| `vrlizate_apps.dart` | Modelos `.vrlz`, manifiestos, cargadores HTTPS, índices `catalog.json`, registro de mini-apps espaciales (`VrSpatialMiniAppRegistry`) y verificador de integridad (`VrPackageIntegrityVerifier`). |
 | `vrlizate_apps_io.dart` | Escaneo e importación en directorio local (`VrlzDirectoryStore`); stub en web. |
 | `vrlizate_apps_library.dart` | Controlador observable de fuentes (`VrlzLibraryController`), sin widgets. |
 | `vrlizate_apps_viewer.dart` | Visor 3D opcional de escenas estáticas (`VrlzSceneViewer`). |

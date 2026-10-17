@@ -86,7 +86,7 @@ final class VrlzWorldBundle {
     final safeTitle = rawTitle.isEmpty
         ? index.id
         : (rawTitle.length > 96 ? rawTitle.substring(0, 96) : rawTitle);
-    final rawRev = '${index.revision}'
+    final rawRev = index.revision
         .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
         .trim();
     final safeRev = rawRev.isEmpty

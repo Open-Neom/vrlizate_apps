@@ -1,5 +1,9 @@
-## Sin publicar
+## 1.0.0 - 2026-10-17
 
+- Promover `vrlizate_apps` a la versión estable `1.0.0` bajo la estructura modular Open Neom (`lib/utils/constants/`, `lib/utils/enums/`, `lib/domain/models/`, `lib/domain/services/`).
+- Añadir `VrAppsConstants`, `VrMiniAppCategory` (`productivity`, `wellness`, `creativity`, `media`, `utilities`, `education`) y `VrSpatialMiniAppDescriptor` para describir mini-apps espaciales con soporte visor/handheld y distancia de colocación.
+- Añadir `VrSpatialMiniAppRegistry` para registrar y filtrar mini-apps integradas y de desarrolladores por categoría y modo.
+- Añadir `VrPackageIntegrityVerifier` para verificación determinista FNV-1a, CRC32 y firmas de cabecera binaria (`.vrlz` ZIP y `.vrlw` magic header).
 - Transporte HTTPS por rangos para lugares `.vrlw`, con ETag fuerte, control de
   tamaño/tiempo y validación de respuestas parciales; reutiliza el lector y la
   caché de `vrlizate_world` sin modificar los perfiles `.vrlz`.
