@@ -72,6 +72,7 @@ Map<String, Uint8List> readVrzZip(
   bool allowManifestOnly = false,
   Set<String> allowedFiles = const {'manifest.json', 'scene.glb'},
   int maxEntries = 2,
+  int maxManifestBytes = 65536,
   bool Function(String)? allowAdditionalFile,
 }) {
   if (bytes.length > maxBytes || bytes.length < 22) {
@@ -161,8 +162,8 @@ Map<String, Uint8List> readVrzZip(
         'Unexpected, duplicate or unsafe ZIP entry name.',
       );
     }
-    if (filename == 'manifest.json' && unpacked > 65536) {
-      throw const FormatException('Manifest exceeds 64 KiB.');
+    if (filename == 'manifest.json' && unpacked > maxManifestBytes) {
+      throw const FormatException('Manifest exceeds its metadata budget.');
     }
     range(local, 30);
     if (u32(local) != 0x04034b50 ||

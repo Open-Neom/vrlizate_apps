@@ -22,6 +22,7 @@ Contenedor y validación de paquetes `.vrlz`, descubrimiento en directorio local
 - **Cartucho NES (`vrlizate.nes.v1`):** `manifest.json` + `game.nes` (iNES NROM 16/32 KiB PRG, 8 KiB CHR, SHA-256, licencia completa y `sourceUrl`).
 - **Nivel Retro 2.5D (`vrlizate.retro2d.v1`):** `manifest.json` + `level.json` (niveles de casillas/entidades importables desde Tiled JSON).
 - **Mundos conectados (`vrlizate.worlds.v1`):** lugares `.vrlw` conectados por portales locales con recursos GLB/RGBA8 estáticos.
+- **Juego web (v1 beta, `vrlizate.webgame.v1`):** índice pequeño de HTML/JS/WASM y recursos con hash/longitud, unidades bajo demanda, caché persistente LRU y perfiles de mando. Requiere un sandbox de navegador del host; no carga Dart AOT ni plugins descargados. Consulta [el contrato webgame](doc/vrlz_webgame_v1_beta.md).
 
 ## Uso rápido
 

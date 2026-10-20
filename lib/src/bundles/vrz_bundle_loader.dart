@@ -28,6 +28,48 @@ final class VrlzPackageLoader extends _BundleLoader<VrlzPackage> {
   }) : super(decode: VrlzPackage.decode);
 }
 
+/// The same bounded/cancellable transport used by package and catalog loaders,
+/// constrained to an exact verified resource. Redirects are never followed.
+final class VrlzResourceLoader extends _BundleLoader<Uint8List> {
+  VrlzResourceLoader({
+    super.client,
+    super.timeout = const Duration(seconds: 30),
+    super.allowLocalHttp = false,
+  }) : super(
+         decode: (bytes, {source}) => bytes,
+         maxDownloadBytes: 64 * 1024 * 1024,
+         maxAllowedDownloadBytes: 64 * 1024 * 1024,
+         maxRedirects: 0,
+       );
+
+  Future<Uint8List> loadVerified(
+    Uri uri, {
+    required int byteLength,
+    required String sha256,
+  }) {
+    if (byteLength < 0 ||
+        byteLength > maxDownloadBytes ||
+        sha256.length != 64 ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(sha256)) {
+      throw const FormatException('Invalid verified resource limits.');
+    }
+    return _load(
+      uri,
+      maxBytes: byteLength,
+      accept: _packageAccept,
+      decode: (bytes, {source}) {
+        if (bytes.length != byteLength ||
+            crypto.sha256.convert(bytes).toString() != sha256) {
+          throw const FormatException(
+            'Web resource length or SHA-256 mismatch.',
+          );
+        }
+        return bytes;
+      },
+    );
+  }
+}
+
 /// Loads an explicit JSON catalog and verifies its packages against that index.
 /// The catalog itself is not a signature or a grant of host runtime capability.
 final class VrlzWebCatalogLoader extends _BundleLoader<VrlzWebCatalog> {
@@ -78,6 +120,7 @@ class _BundleLoader<T> {
     this.timeout = const Duration(seconds: 30),
     this.maxDownloadBytes = VrzBundle.maxBytes,
     this.maxRedirects = 3,
+    this.allowLocalHttp = false,
     int maxAllowedDownloadBytes = VrzBundle.maxBytes,
     String accept = _packageAccept,
   }) : _client = client ?? http.Client(),
@@ -100,6 +143,7 @@ class _BundleLoader<T> {
   final Duration timeout;
   final int maxDownloadBytes;
   final int maxRedirects;
+  final bool allowLocalHttp;
   final _active = <_Download>[];
   bool _closed = false;
 
@@ -227,8 +271,12 @@ class _BundleLoader<T> {
     if (_ownsClient) _client.close();
   }
 
-  static void _validateUri(Uri uri) {
-    if (uri.scheme != 'https' ||
+  void _validateUri(Uri uri) {
+    final local =
+        allowLocalHttp &&
+        uri.scheme == 'http' &&
+        const {'127.0.0.1', '::1'}.contains(uri.host);
+    if ((uri.scheme != 'https' && !local) ||
         uri.host.isEmpty ||
         uri.userInfo.isNotEmpty ||
         uri.hasFragment ||

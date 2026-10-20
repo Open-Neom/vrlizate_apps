@@ -1,10 +1,10 @@
-# VRLZ: escenas, demos integradas, cartuchos NES y juegos retro 2.5D
+# VRLZ: perfiles portables de experiencias
 
 El perfil de escena VRLZ v1 es un contenedor de **datos** para el runtime `vrlizate.scene.v1` incluido en la aplicación anfitriona. Permite publicar una escena 3D en un hosting HTTPS, descargarla, validarla y abrirla sin reconstruir la aplicación. No incorpora ni ejecuta Dart, JavaScript, bibliotecas nativas o plugins descargados. El visor y sus controles ya están compilados en VRlizate Apps.
 
-Estos perfiles forman la base de `vrlizate_apps`. No representa todavía un formato de aplicaciones Flutter completas. El perfil de escena no admite scripts, permisos, autenticación propia, animaciones, texturas, audio ni red desde la escena. El perfil NES experimental interpreta las instrucciones del cartucho dentro de un emulador incluido por el host; no ejecuta Dart descargado ni instala bibliotecas nativas.
+Estos perfiles forman la base de `vrlizate_apps`. El perfil de escena no admite scripts, permisos, autenticación propia, animaciones, texturas, audio ni red desde la escena. El perfil NES experimental interpreta las instrucciones del cartucho dentro de un emulador incluido por el host; no ejecuta Dart descargado ni instala bibliotecas nativas. El nuevo [perfil webgame v1 beta](vrlz_webgame_v1_beta.md) permite builds web mediante un sandbox de navegador explícito del host, con recursos verificados bajo demanda; no relaja las reglas de los perfiles estáticos.
 
-## Cuatro perfiles explícitos
+## Perfiles explícitos
 
 La extensión canónica es **`.vrlz`**. El módulo `vrlizate_apps` posee el formato, el transporte y la detección; Home solo presenta la biblioteca. El lector conserva los bytes del perfil de escena original, antes llamado `.vrz`, sin migrar ni reinterpretar su manifiesto.
 
@@ -14,6 +14,8 @@ La extensión canónica es **`.vrlz`**. El módulo `vrlizate_apps` posee el form
 | Demo integrada | 2 | `vrlizate.builtin.v1` | Solo `manifest.json` |
 | Cartucho NES experimental | 3 | `vrlizate.nes.v1` | `manifest.json`, `game.nes` |
 | Juego retro 2.5D experimental | 4 | `vrlizate.retro2d.v1` | `manifest.json`, `level.json` |
+| Mundos conectados | 1 | `vrlizate.worlds.v1` | `manifest.json`, lugares `.vrlw` |
+| Juego web v1 beta | 1 | `vrlizate.webgame.v1` | Solo `manifest.json`; recursos separados con hash/longitud |
 
 El par versión/runtime decide el perfil antes de validar su contenido. Un error de GLB, checksum o manifiesto de escena se rechaza; no se intenta abrir como demo integrada. Formatos futuros o pares cruzados también se rechazan.
 
@@ -28,7 +30,7 @@ scene.glb
 
 El perfil de demo integrada contiene **solo `manifest.json`**; NES contiene **`manifest.json` y `game.nes`**, y retro 2.5D contiene **`manifest.json` y `level.json`**. Todas las entradas usan el método ZIP **STORE (0), sin compresión**. Se rechazan DEFLATE, ZIP64, múltiples discos, cifrado, descriptores de datos, comentarios, campos extra, enlaces simbólicos, directorios y cualquier otra entrada. Los nombres deben coincidir exactamente: no se admiten rutas, duplicados ni diferencias entre las cabeceras locales y el directorio central. Se verifica el CRC-32 de los bytes reales de cada entrada, además del SHA-256 del payload que corresponde al perfil.
 
-El tamaño máximo general del archivo completo es **32 MiB**, reducido a **128 KiB** para NES y **256 KiB** para retro 2.5D; el manifiesto tiene un límite de **64 KiB**. Se procesa en memoria y nunca se extrae al sistema de archivos. El lector no usa descompresión: un ZIP comprimido pequeño no puede inflarse a un contenido arbitrariamente grande. No usa un lector que silenciosamente sustituya entradas duplicadas.
+El tamaño máximo general del archivo completo es **32 MiB**, reducido a **128 KiB** para NES y **256 KiB** para retro 2.5D; el manifiesto de esos perfiles conserva un límite de **64 KiB**. El índice webgame tiene su propio límite de **512 KiB** para el contenedor y sus metadatos. Se procesa en memoria y nunca se extrae al sistema de archivos. El lector no usa descompresión: un ZIP comprimido pequeño no puede inflarse a un contenido arbitrariamente grande. No usa un lector que silenciosamente sustituya entradas duplicadas.
 
 SHA-256 y CRC detectan alteraciones e incoherencias; **no autentican al autor**. Cualquiera puede construir un paquete válido y sus propias sumas. HTTPS protege el transporte. Firmas, catálogo de confianza y actualizaciones verificadas requerirían otro contrato explícito.
 

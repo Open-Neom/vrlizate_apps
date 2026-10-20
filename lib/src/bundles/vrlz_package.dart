@@ -15,8 +15,9 @@ import 'vrz_manifest.dart';
 import 'vrz_zip.dart';
 import 'vrlz_world_bundle.dart';
 import 'vrlz_world_manifest.dart';
+import 'vrlz_web_game_manifest.dart';
 
-enum VrlzPackageKind { scene, builtin, nes, retro, worlds }
+enum VrlzPackageKind { scene, builtin, nes, retro, worlds, webgame }
 
 /// Validated VRLZ content for an explicitly supported host runtime.
 ///
@@ -29,6 +30,7 @@ final class VrlzPackage {
       builtinManifest = null,
       nesBundle = null,
       retroBundle = null,
+      webGameManifest = null,
       worldBundle = null,
       source = scene.source;
 
@@ -37,6 +39,7 @@ final class VrlzPackage {
       sceneBundle = null,
       nesBundle = null,
       retroBundle = null,
+      webGameManifest = null,
       worldBundle = null,
       builtinManifest = manifest;
 
@@ -46,6 +49,7 @@ final class VrlzPackage {
       builtinManifest = null,
       nesBundle = bundle,
       retroBundle = null,
+      webGameManifest = null,
       worldBundle = null,
       source = bundle.source;
 
@@ -55,6 +59,7 @@ final class VrlzPackage {
       builtinManifest = null,
       nesBundle = null,
       retroBundle = bundle,
+      webGameManifest = null,
       worldBundle = null,
       source = bundle.source;
 
@@ -64,8 +69,18 @@ final class VrlzPackage {
       builtinManifest = null,
       nesBundle = null,
       retroBundle = null,
+      webGameManifest = null,
       worldBundle = bundle,
       source = bundle.source;
+
+  VrlzPackage._webgame(VrlzWebGameManifest manifest, this.source)
+    : kind = VrlzPackageKind.webgame,
+      sceneBundle = null,
+      builtinManifest = null,
+      nesBundle = null,
+      retroBundle = null,
+      worldBundle = null,
+      webGameManifest = manifest;
 
   static const maxBytes = VrzBundle.maxBytes;
   final VrlzPackageKind kind;
@@ -75,29 +90,36 @@ final class VrlzPackage {
   final VrlzNesBundle? nesBundle;
   final VrlzRetroBundle? retroBundle;
   final VrlzWorldBundle? worldBundle;
+  final VrlzWebGameManifest? webGameManifest;
   String get id =>
       sceneBundle?.manifest.id ??
       builtinManifest?.id ??
       nesBundle?.manifest.id ??
       retroBundle?.manifest.id ??
+      webGameManifest?.id ??
       worldBundle!.manifest.id;
   String get title =>
       sceneBundle?.manifest.title ??
       builtinManifest?.title ??
       nesBundle?.manifest.title ??
       retroBundle?.manifest.title ??
+      webGameManifest?.title ??
       worldBundle!.manifest.title;
   String get description =>
       sceneBundle?.manifest.description ??
       builtinManifest?.description ??
       nesBundle?.manifest.description ??
       retroBundle?.manifest.description ??
+      webGameManifest?.description ??
       worldBundle!.manifest.description;
   String? get demoId => builtinManifest?.demoId;
 
   /// Rebuilds a validated STORE container without retaining downloaded bytes.
   /// Metadata and camera are preserved; [source] is transport provenance only.
   Uint8List encode() {
+    if (webGameManifest != null) {
+      return encodeWebGame(manifest: webGameManifest!);
+    }
     if (worldBundle != null) return worldBundle!.encodeBundle();
     final scene = sceneBundle;
     if (scene != null) {
@@ -153,6 +175,7 @@ final class VrlzPackage {
       maxBytes,
       allowManifestOnly: true,
       maxEntries: 9,
+      maxManifestBytes: VrlzWebGameManifest.maxIndexBytes,
       allowAdditionalFile: VrlzWorldBundle.isWorldFile,
       allowedFiles: const {
         'manifest.json',
@@ -161,11 +184,27 @@ final class VrlzPackage {
         'level.json',
       },
     );
+    if (files['manifest.json']!.length > VrlzWebGameManifest.maxIndexBytes) {
+      throw const FormatException('VRLZ manifest exceeds its metadata budget.');
+    }
     final json = decodeVrzJson(files['manifest.json']!);
+    if (json['runtime'] != VrlzWebGameManifest.runtime &&
+        files['manifest.json']!.length > 65536) {
+      throw const FormatException('Legacy VRLZ manifest exceeds 64 KiB.');
+    }
     if (json['formatVersion'] is int &&
         json['formatVersion'] == 1 &&
         json['runtime'] == VrlzWorldManifest.runtime) {
       return VrlzPackage._worlds(VrlzWorldBundle.decode(bytes, source: source));
+    }
+    if (json['runtime'] == VrlzWebGameManifest.runtime) {
+      if (files.length != 1 ||
+          bytes.length > VrlzWebGameManifest.maxIndexBytes) {
+        throw const FormatException(
+          'Webgame VRLZ must contain only a bounded manifest.json.',
+        );
+      }
+      return VrlzPackage._webgame(VrlzWebGameManifest.fromJson(json), source);
     }
     // Select the runtime before validating its payload; a broken scene must
     // never be retried as a builtin descriptor or another runtime.
@@ -195,6 +234,18 @@ final class VrlzPackage {
       return VrlzPackage._retro(VrlzRetroBundle.decode(bytes, source: source));
     }
     throw const FormatException('Unsupported VRLZ format version or runtime.');
+  }
+
+  /// Small index only; JS/WASM/assets remain individually verified resources.
+  static Uint8List encodeWebGame({required VrlzWebGameManifest manifest}) {
+    final bytes = Uint8List.fromList(
+      utf8.encode(jsonEncode(manifest.toJson())),
+    );
+    final encoded = writeVrzStoreZip({
+      'manifest.json': bytes,
+    }, VrlzWebGameManifest.maxIndexBytes);
+    decode(encoded);
+    return encoded;
   }
 
   /// Packages bounded tile data for the host's retro 2.5D game runtime.

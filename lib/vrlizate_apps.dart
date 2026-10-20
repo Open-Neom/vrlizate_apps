@@ -22,3 +22,8 @@ export 'src/bundles/vrlz_world_bundle.dart';
 export 'src/bundles/vrlz_world_session.dart';
 export 'utils/constants/vr_apps_constants.dart';
 export 'utils/enums/vr_mini_app_category.dart';
+
+export 'src/bundles/vrlz_web_game_manifest.dart';
+export 'src/bundles/vrlz_web_game_cache.dart'
+    show VrlzWebGameCache, VrlzWebGameMemoryCache;
+export 'src/bundles/vrlz_web_game_loader.dart';
