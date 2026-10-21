@@ -1,6 +1,7 @@
-## 1.0.0 - 2026-10-17
+## 1.0.0 - 2026-10-20
 
 - Promover `vrlizate_apps` a la versión estable `1.0.0` bajo la estructura modular Open Neom (`lib/utils/constants/`, `lib/utils/enums/`, `lib/domain/models/`, `lib/domain/services/`).
+- Añadir perfil de paquetes WebGame v5 (`vrlizate.webgame.v1`), `VrlzWebGameManifest`, `VrlzWebGameBundle` y `VrlzWebGameCache` para empaquetar, verificar por SHA-256 y servir en caché juegos HTML5/WebGL open-source dentro de `.vrlz`.
 - Añadir `VrAppsConstants`, `VrMiniAppCategory` (`productivity`, `wellness`, `creativity`, `media`, `utilities`, `education`) y `VrSpatialMiniAppDescriptor` para describir mini-apps espaciales con soporte visor/handheld y distancia de colocación.
 - Añadir `VrSpatialMiniAppRegistry` para registrar y filtrar mini-apps integradas y de desarrolladores por categoría y modo.
 - Añadir `VrPackageIntegrityVerifier` para verificación determinista FNV-1a, CRC32 y firmas de cabecera binaria (`.vrlz` ZIP y `.vrlw` magic header).
