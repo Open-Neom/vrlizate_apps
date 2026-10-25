@@ -11,10 +11,11 @@ import 'vrz_fixture.dart';
 ({Map<String, dynamic> manifest, Map<String, Uint8List> files}) worldFixture({
   Uint8List? model,
   void Function(Map<String, dynamic>)? changeWorld,
+  List<String> worldAliases = const ['garden', 'gallery'],
 }) {
   final worlds = <Map<String, dynamic>>[];
   final files = <String, Uint8List>{};
-  for (final alias in ['garden', 'gallery']) {
+  for (final alias in worldAliases) {
     final source = <String, dynamic>{
       'schemaVersion': 1,
       'id': 'test.$alias',
@@ -127,8 +128,9 @@ Uint8List uncheckedWorldArchive(
   Map<String, Uint8List> files,
 ) {
   final data = utf8.encode(jsonEncode(manifest));
-  return writeVrzStoreZip({
-    'manifest.json': Uint8List.fromList(data),
-    ...files,
-  }, VrlzWorldBundle.maxBytes);
+  return writeVrzStoreZip(
+    {'manifest.json': Uint8List.fromList(data), ...files},
+    VrlzWorldBundle.maxBytes,
+    maxEntries: files.length + 1,
+  );
 }

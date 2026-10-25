@@ -6,11 +6,14 @@ import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 import 'package:vrlizate_world/vrlizate_world.dart';
 
+import '../bundles/vrz_glb.dart';
+import 'vrlw_world_activity.dart';
+
 /// GPU projection of a prepared portable world. The caller validates GLB data
 /// with the Apps profile before passing resources here, and owns the reader.
 /// Geometry/materials are uploaded once, then reused by regional instances.
 class VrlwSceneAdapter {
-  VrlwSceneAdapter._(this.reader) {
+  VrlwSceneAdapter._(this.reader, this.activity) {
     final provider = VrlwRegionProvider(reader);
     cache = VrRegionCache(
       grid: provider.grid,
@@ -26,6 +29,7 @@ class VrlwSceneAdapter {
   }
 
   final VrlwPlaceReader reader;
+  final VrlwWorldActivity activity;
   final scene = VrlwGuardedScene();
   late final VrRegionCache<List<VrWorldEntity>> cache;
   late final StreamSubscription<VrRegionSnapshot<List<VrWorldEntity>>>
@@ -35,6 +39,9 @@ class VrlwSceneAdapter {
   late final List<VrlwAudioEmitter> audioEmitters = reader.index.audioEmitters;
   bool _dirty = true, _disposed = false;
   double _maintenance = 0;
+  double _motionAccumulator = 0;
+  final _moving = <_MovingInstance>[];
+  static const maxMovingPrimitiveInstances = 16;
   static const maxVisibleEntities = 128;
   static const maxPrimitiveInstances = 256;
 
@@ -46,11 +53,16 @@ class VrlwSceneAdapter {
     VrlwPlaceReader reader,
     Map<String, Uint8List> resources, {
     required bool Function() isCurrent,
+    VrlwWorldActivity? activity,
   }) async {
-    final adapter = VrlwSceneAdapter._(reader);
+    final adapter = VrlwSceneAdapter._(
+      reader,
+      activity ?? VrlwWorldActivity(reader.index),
+    );
     try {
       final models = <String, fs.Node>{};
       final textures = <String, fs.Texture2D>{};
+      final materials = VrlwMaterialCache();
       final triangleCounts = Map<fs.Geometry, int>.identity();
       var primitiveCount = 0;
       const sampling = fs.TextureSampling(maxAnisotropy: 4);
@@ -89,6 +101,11 @@ class VrlwSceneAdapter {
         if (!isCurrent()) throw StateError('World opening cancelled.');
         final model = models[binding.model] ??= await fs.Node.fromGlbBytes(
           resources[binding.model]!,
+          maxTextureSize: VrzGlbTextureLimits.maxDimension,
+          onWarning: (_) {
+            // A malformed image must not silently become a white placeholder.
+            throw const FormatException('Portable GLB import failed.');
+          },
         );
         if (!isCurrent()) throw StateError('World opening cancelled.');
         final baseColor = await loadTexture(
@@ -140,33 +157,14 @@ class VrlwSceneAdapter {
                 'Portable world requires nonempty triangle geometry.',
               );
             }
-            final original = primitive.material;
-            final fs.Material material;
-            if (original is fs.UnlitMaterial) {
-              material = fs.UnlitMaterial(colorTexture: baseColor)
-                ..baseColorFactor = original.baseColorFactor.clone()
-                ..alphaMode = original.alphaMode
-                ..vertexColorWeight = original.vertexColorWeight
-                ..doubleSided = original.doubleSided;
-            } else if (original is fs.PhysicallyBasedMaterial) {
-              material = fs.PhysicallyBasedMaterial()
-                ..baseColorFactor = original.baseColorFactor.clone()
-                ..roughnessFactor = original.roughnessFactor
-                ..metallicFactor = original.metallicFactor
-                ..emissiveFactor = original.emissiveFactor.clone()
-                ..alphaMode = original.alphaMode
-                ..alphaCutoff = original.alphaCutoff
-                ..vertexColorWeight = original.vertexColorWeight
-                ..doubleSided = original.doubleSided
-                ..baseColorTexture = baseColor ?? original.baseColorTexture
-                ..normalTexture = normal ?? original.normalTexture
-                ..metallicRoughnessTexture =
-                    metallicRoughness ?? original.metallicRoughnessTexture
-                ..emissiveTexture = emissive ?? original.emissiveTexture
-                ..occlusionTexture = occlusion ?? original.occlusionTexture;
-            } else {
-              throw const FormatException('Unsupported portable material.');
-            }
+            final material = materials.resolve(
+              primitive.material,
+              baseColor: baseColor,
+              normal: normal,
+              metallicRoughness: metallicRoughness,
+              emissive: emissive,
+              occlusion: occlusion,
+            );
             final mesh = fs.InstancedMesh(
               geometry: primitive.geometry,
               material: material,
@@ -178,7 +176,18 @@ class VrlwSceneAdapter {
                 ..shadowCastingMode = shadowMode
                 ..addComponent(fs.InstancedMeshComponent(mesh)),
             );
-            parts.add(_Part(mesh, transform, triangles));
+            final matches = reader.index.motions.where(
+              (m) =>
+                  m.prototypeId == binding.prototypeId && m.node == node.name,
+            );
+            parts.add(
+              _Part(
+                mesh,
+                transform,
+                triangles,
+                matches.isEmpty ? null : matches.single,
+              ),
+            );
           }
           for (final child in node.children) {
             visit(child, transform);
@@ -240,7 +249,10 @@ class VrlwSceneAdapter {
       _maintenance = 0;
       cache.prune();
     }
-    if (!_dirty) return;
+    if (!_dirty) {
+      _updateMotion(eye, dt);
+      return;
+    }
     _dirty = false;
     final snapshot = cache.snapshot;
     if (snapshot.errors.isNotEmpty) throw snapshot.errors.values.first;
@@ -251,6 +263,11 @@ class VrlwSceneAdapter {
       for (final entry in _parts.entries)
         entry.key: [for (final part in entry.value) part.triangles],
     });
+    validateActiveMotion(entities, {
+      for (final entry in _parts.entries)
+        entry.key: entry.value.where((p) => p.motion != null).length,
+    });
+    _moving.clear();
     for (final parts in _parts.values) {
       for (final part in parts) {
         part.mesh.clearInstances();
@@ -267,7 +284,75 @@ class VrlwSceneAdapter {
             ..rotateY(pose.yawRadians)
             ..scaleByDouble(pose.scale, pose.scale, pose.scale, 1);
       for (final part in _parts[entity.prototypeId]!) {
-        part.mesh.addInstance(transform.multiplied(part.transform));
+        final motion = part.motion;
+        final actual = motion == null
+            ? transform.multiplied(part.transform)
+            : transform
+                  .multiplied(activity.delta(motion.id))
+                  .multiplied(part.transform);
+        final slot = part.mesh.addInstance(actual);
+        if (motion != null) {
+          _moving.add(
+            _MovingInstance(
+              part,
+              slot,
+              transform,
+              transform.transformed3(vm.Vector3.array(motion.pivot)),
+            ),
+          );
+        }
+      }
+    }
+    _updateMotion(eye, dt);
+  }
+
+  void _updateMotion(vm.Vector3 eye, double dt) {
+    final nearby = <String>{};
+    for (final moving in _moving) {
+      final m = moving.part.motion!;
+      if (eye.distanceToSquared(moving.center) <=
+          m.rangeMeters * m.rangeMeters) {
+        nearby.add(m.id);
+      }
+    }
+    activity.advance(dt, nearby);
+    _motionAccumulator += dt.isFinite ? dt.clamp(0, .1) : 0;
+    if (_motionAccumulator < 1 / 30) return;
+    _motionAccumulator = 0;
+    for (final moving in _moving) {
+      final m = moving.part.motion!;
+      if (!nearby.contains(m.id) ||
+          !activity.motionEnabled(m.id) ||
+          eye.distanceToSquared(moving.center) >
+              m.rangeMeters * m.rangeMeters) {
+        continue;
+      }
+      moving.part.mesh.setInstanceTransform(
+        moving.slot,
+        moving.entityTransform
+            .multiplied(activity.delta(m.id))
+            .multiplied(moving.part.transform),
+      );
+    }
+  }
+
+  /// Checks the complete resident set before changing any GPU instances.
+  /// The moving-part budget includes paused and distant resident instances.
+  static void validateActiveMotion(
+    Iterable<VrWorldEntity> entities,
+    Map<String, int> movingPrimitiveCounts,
+  ) {
+    var count = 0;
+    for (final entity in entities) {
+      final parts = movingPrimitiveCounts[entity.prototypeId];
+      if (parts == null || parts < 0) {
+        throw const FormatException('Invalid moving primitive inventory.');
+      }
+      count += parts;
+      if (count > maxMovingPrimitiveInstances) {
+        throw const FormatException(
+          'Portable world exceeds 16 moving primitive instances.',
+        );
       }
     }
   }
@@ -327,14 +412,142 @@ class VrlwSceneAdapter {
     scene.onError = null;
     scene.root.removeAll();
     _parts.clear();
+    _moving.clear();
   }
 }
 
 class _Part {
-  _Part(this.mesh, this.transform, this.triangles);
+  _Part(this.mesh, this.transform, this.triangles, this.motion);
   final fs.InstancedMesh mesh;
   final vm.Matrix4 transform;
   final int triangles;
+  final VrlwMotionSpec? motion;
+}
+
+class _MovingInstance {
+  _MovingInstance(this.part, this.slot, this.entityTransform, this.center);
+  final _Part part;
+  final int slot;
+  final vm.Matrix4 entityTransform;
+  final vm.Vector3 center;
+}
+
+typedef _MaterialKey = (
+  fs.Material,
+  fs.TextureSource?,
+  fs.TextureSource?,
+  fs.TextureSource?,
+  fs.TextureSource?,
+  fs.TextureSource?,
+);
+
+/// Reuses imported materials unless a binding overrides one of their maps.
+/// The same result is shared across regional instances and both render views;
+/// this does not merge separate embedded images from different GLB imports.
+final class VrlwMaterialCache {
+  final _materials = <_MaterialKey, fs.Material>{};
+
+  fs.Material resolve(
+    fs.Material original, {
+    fs.TextureSource? baseColor,
+    fs.TextureSource? normal,
+    fs.TextureSource? metallicRoughness,
+    fs.TextureSource? emissive,
+    fs.TextureSource? occlusion,
+  }) {
+    if (original is! fs.UnlitMaterial &&
+        original is! fs.PhysicallyBasedMaterial) {
+      throw const FormatException('Unsupported portable material.');
+    }
+    final key = (
+      original,
+      baseColor,
+      normal,
+      metallicRoughness,
+      emissive,
+      occlusion,
+    );
+    return _materials.putIfAbsent(key, () {
+      if (baseColor == null &&
+          normal == null &&
+          metallicRoughness == null &&
+          emissive == null &&
+          occlusion == null) {
+        // Preserve the importer texture, sampler and all material properties.
+        return original;
+      }
+      fs.TextureTransform transform(fs.TextureTransform source) =>
+          fs.TextureTransform(
+            offset: source.offset.clone(),
+            scale: source.scale.clone(),
+            rotation: source.rotation,
+          );
+      if (original is fs.UnlitMaterial) {
+        return fs.UnlitMaterial(
+            colorTexture: baseColor ?? original.baseColorTexture,
+          )
+          ..name = original.name
+          ..baseColorFactor = original.baseColorFactor.clone()
+          ..baseColorTextureTransform = baseColor == null
+              ? transform(original.baseColorTextureTransform)
+              : fs.TextureTransform()
+          ..baseColorTextureTexCoord = baseColor == null
+              ? original.baseColorTextureTexCoord
+              : 0
+          ..alphaMode = original.alphaMode
+          ..vertexColorWeight = original.vertexColorWeight
+          ..doubleSided = original.doubleSided
+          ..displayReferred = original.displayReferred;
+      }
+      final physical = original as fs.PhysicallyBasedMaterial;
+      return fs.PhysicallyBasedMaterial()
+        ..name = physical.name
+        ..baseColorFactor = physical.baseColorFactor.clone()
+        ..roughnessFactor = physical.roughnessFactor
+        ..metallicFactor = physical.metallicFactor
+        ..emissiveFactor = physical.emissiveFactor.clone()
+        ..alphaMode = physical.alphaMode
+        ..alphaCutoff = physical.alphaCutoff
+        ..vertexColorWeight = physical.vertexColorWeight
+        ..doubleSided = physical.doubleSided
+        ..baseColorTexture = baseColor ?? physical.baseColorTexture
+        ..baseColorTextureTransform = baseColor == null
+            ? transform(physical.baseColorTextureTransform)
+            : fs.TextureTransform()
+        ..baseColorTextureTexCoord = baseColor == null
+            ? physical.baseColorTextureTexCoord
+            : 0
+        ..normalTexture = normal ?? physical.normalTexture
+        ..normalTextureTransform = normal == null
+            ? transform(physical.normalTextureTransform)
+            : fs.TextureTransform()
+        ..normalTextureTexCoord = normal == null
+            ? physical.normalTextureTexCoord
+            : 0
+        ..metallicRoughnessTexture =
+            metallicRoughness ?? physical.metallicRoughnessTexture
+        ..metallicRoughnessTextureTransform = metallicRoughness == null
+            ? transform(physical.metallicRoughnessTextureTransform)
+            : fs.TextureTransform()
+        ..metallicRoughnessTextureTexCoord = metallicRoughness == null
+            ? physical.metallicRoughnessTextureTexCoord
+            : 0
+        ..emissiveTexture = emissive ?? physical.emissiveTexture
+        ..emissiveTextureTransform = emissive == null
+            ? transform(physical.emissiveTextureTransform)
+            : fs.TextureTransform()
+        ..emissiveTextureTexCoord = emissive == null
+            ? physical.emissiveTextureTexCoord
+            : 0
+        ..occlusionTexture = occlusion ?? physical.occlusionTexture
+        ..occlusionTextureTransform = occlusion == null
+            ? transform(physical.occlusionTextureTransform)
+            : fs.TextureTransform()
+        ..occlusionTextureTexCoord = occlusion == null
+            ? physical.occlusionTextureTexCoord
+            : 0;
+    });
+  }
 }
 
 /// Escalates render failures to the host instead of repeating them every frame.

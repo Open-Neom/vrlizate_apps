@@ -2,9 +2,22 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:vector_math/vector_math_64.dart' as vm;
+import 'package:vrlizate_world/vrlizate_world.dart';
+
+/// Admission limits for the opt-in, embedded base-color subset of world GLB.
+abstract final class VrzGlbTextureLimits {
+  static const maxImages = 4;
+  static const maxDimension = 256;
+  static const maxDecodedBytes = 1024 * 1024;
+}
 
 /// The scene subset is intentionally smaller than all of glTF 2.0.
-void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
+/// Existing VRZ scenes remain texture-free; only portable worlds opt in.
+void validateVrzGlb(
+  Uint8List bytes, {
+  int maxSubmittedTriangles = 250000,
+  bool allowEmbeddedBaseColorTextures = false,
+}) {
   void fail(String message) => throw FormatException('VRZ GLB: $message');
   if (bytes.length < 28) fail('truncated header');
   final data = ByteData.sublistView(bytes);
@@ -46,11 +59,12 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
       (asset['minVersion'] != null && asset['minVersion'] != '2.0')) {
     fail('unsupported glTF asset version');
   }
-  _checkTree(json);
+  _checkTree(
+    json,
+    allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
+  );
   for (final key in [
-    'images',
-    'textures',
-    'samplers',
+    if (!allowEmbeddedBaseColorTextures) ...['images', 'textures', 'samplers'],
     'animations',
     'skins',
     'cameras',
@@ -94,9 +108,81 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
     }
     viewInfo.add((start: start, length: length, stride: stride));
   }
+  final textures = _list(json['textures'], 'textures');
+  if (allowEmbeddedBaseColorTextures) {
+    final images = _list(json['images'], 'images');
+    final samplers = _list(json['samplers'], 'samplers');
+    if (images.length > VrzGlbTextureLimits.maxImages ||
+        textures.length > VrzGlbTextureLimits.maxImages ||
+        samplers.length > VrzGlbTextureLimits.maxImages) {
+      fail('embedded texture count budget exceeded');
+    }
+    var decodedBytes = 0;
+    final imagePixels = <int>[];
+    for (final value in images) {
+      final image = _map(value, 'image');
+      if (image['mimeType'] != 'image/png') {
+        fail('embedded images must declare image/png');
+      }
+      final view =
+          viewInfo[_index(
+            image['bufferView'],
+            viewInfo.length,
+            'image.bufferView',
+          )];
+      if (view.stride != null) fail('PNG bufferView cannot have byteStride');
+      final size = VrlwBundleCodec.validatePngTextureBytes(
+        Uint8List.sublistView(bin, view.start, view.start + view.length),
+        requireComplete: true,
+        maxDimension: VrzGlbTextureLimits.maxDimension,
+      );
+      if (size.width > VrzGlbTextureLimits.maxDimension ||
+          size.height > VrzGlbTextureLimits.maxDimension) {
+        fail('embedded PNG exceeds 256 pixels per side');
+      }
+      final pixels = size.width * size.height * 4;
+      imagePixels.add(pixels);
+      decodedBytes += pixels;
+    }
+    if (decodedBytes > VrzGlbTextureLimits.maxDecodedBytes) {
+      fail('embedded PNG decoded-byte budget exceeded');
+    }
+    var uploadedBytes = 0;
+    for (final value in textures) {
+      final texture = _map(value, 'texture');
+      final source = _index(texture['source'], images.length, 'texture.source');
+      // The importer uploads once per texture entry, even for a shared image.
+      uploadedBytes += imagePixels[source];
+      if (texture.containsKey('sampler')) {
+        _index(texture['sampler'], samplers.length, 'texture.sampler');
+      }
+    }
+    if (uploadedBytes > VrzGlbTextureLimits.maxDecodedBytes) {
+      fail('embedded texture upload budget exceeded');
+    }
+    for (final value in samplers) {
+      final sampler = _map(value, 'sampler');
+      bool validEnum(String key, List<int> allowed) =>
+          !sampler.containsKey(key) ||
+          (sampler[key] is int && allowed.contains(sampler[key]));
+      if (!validEnum('magFilter', const [9728, 9729]) ||
+          !validEnum('minFilter', const [9728, 9729, 9984, 9985, 9986, 9987]) ||
+          !validEnum('wrapS', const [33071, 33648, 10497]) ||
+          !validEnum('wrapT', const [33071, 33648, 10497])) {
+        fail('unsupported embedded texture sampler');
+      }
+    }
+  }
   final info =
       <
-        ({int count, int component, String type, int maximum, bool normalized})
+        ({
+          int count,
+          int component,
+          String type,
+          int maximum,
+          double absoluteMaximum,
+          bool normalized,
+        })
       >[];
   var totalComponents = 0;
   final binaryData = ByteData.sublistView(bin);
@@ -148,6 +234,7 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
       fail('accessor lies outside its bufferView');
     }
     var maximum = 0;
+    var absoluteMaximum = 0.0;
     for (var item = 0; item < count; item++) {
       for (var channel = 0; channel < components; channel++) {
         final at = view.start + local + item * stride + channel * componentSize;
@@ -156,6 +243,7 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
           if (!number.isFinite || number.abs() > 1000000) {
             fail('non-finite or excessive geometry value');
           }
+          if (number.abs() > absoluteMaximum) absoluteMaximum = number.abs();
         } else if (component == 5121 ||
             component == 5123 ||
             component == 5125) {
@@ -173,11 +261,13 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
       component: component,
       type: type as String,
       maximum: maximum,
+      absoluteMaximum: absoluteMaximum,
       normalized: normalized as bool,
     ));
   }
   final materials = _list(json['materials'], 'materials');
   if (materials.length > 256) fail('material budget exceeded');
+  final texturedMaterials = <int>{};
   for (final value in materials) {
     final material = _map(value, 'material');
     if (material.containsKey('pbrMetallicRoughness')) {
@@ -190,6 +280,15 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
       }
       for (final key in ['metallicFactor', 'roughnessFactor']) {
         if (pbr.containsKey(key)) _unitNumber(pbr[key]);
+      }
+      if (pbr.containsKey('baseColorTexture')) {
+        final texture = _map(pbr['baseColorTexture'], 'baseColorTexture');
+        _index(texture['index'], textures.length, 'baseColorTexture.index');
+        if (_integer(texture['texCoord'] ?? 0, 'baseColorTexture.texCoord') !=
+            0) {
+          fail('embedded baseColorTexture must use TEXCOORD_0');
+        }
+        texturedMaterials.add(materials.indexOf(value));
       }
     }
     if (material.containsKey('emissiveFactor')) {
@@ -257,6 +356,16 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
             attribute.component != 5126) {
           fail('normals and tangents must use floats');
         }
+        if (allowEmbeddedBaseColorTextures && entry.key == 'TEXCOORD_0') {
+          if (!((attribute.component == 5126 && !attribute.normalized) ||
+                  (const [5121, 5123].contains(attribute.component) &&
+                      attribute.normalized)) ||
+              attribute.absoluteMaximum > 4096) {
+            fail(
+              'TEXCOORD_0 must use bounded float or normalized unsigned UVs',
+            );
+          }
+        }
       }
       var indexCount = position.count;
       if (primitive.containsKey('indices')) {
@@ -274,7 +383,15 @@ void validateVrzGlb(Uint8List bytes, {int maxSubmittedTriangles = 250000}) {
         fail('triangle index count must be divisible by three');
       }
       if (primitive.containsKey('material')) {
-        _index(primitive['material'], materials.length, 'material');
+        final material = _index(
+          primitive['material'],
+          materials.length,
+          'material',
+        );
+        if (texturedMaterials.contains(material) &&
+            !attributes.containsKey('TEXCOORD_0')) {
+          fail('textured primitive requires TEXCOORD_0');
+        }
       }
       triangles += indexCount ~/ 3;
       vertices += position.count;
@@ -421,13 +538,16 @@ void _checkNumbers(Object? value) {
   }
 }
 
-void _checkTree(Object? value) {
+void _checkTree(Object? value, {required bool allowEmbeddedBaseColorTextures}) {
   if (value is Map) {
     for (final entry in value.entries) {
       if (entry.key == 'name' && entry.value is! String) {
         throw const FormatException('GLB names must be strings.');
       }
-      if (entry.key == 'uri' || (entry.key as String).endsWith('Texture')) {
+      if (entry.key == 'uri' ||
+          ((entry.key as String).endsWith('Texture') &&
+              !(allowEmbeddedBaseColorTextures &&
+                  entry.key == 'baseColorTexture'))) {
         throw const FormatException(
           'VRZ GLB must not reference external resources or textures.',
         );
@@ -439,11 +559,17 @@ void _checkTree(Object? value) {
           throw const FormatException('Unsupported GLB extension.');
         }
       }
-      _checkTree(entry.value);
+      _checkTree(
+        entry.value,
+        allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
+      );
     }
   } else if (value is List) {
     for (final item in value) {
-      _checkTree(item);
+      _checkTree(
+        item,
+        allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
+      );
     }
   }
 }

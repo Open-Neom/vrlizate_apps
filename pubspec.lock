@@ -420,21 +420,21 @@ packages:
       path: "../vrlizate_spatial_audio"
       relative: true
     source: path
-    version: "0.1.0"
+    version: "1.0.0"
   vrlizate_widgets:
     dependency: "direct overridden"
     description:
       path: "../vrlizate_widgets"
       relative: true
     source: path
-    version: "0.3.1"
+    version: "1.0.0"
   vrlizate_world:
     dependency: "direct main"
     description:
       path: "../vrlizate_world"
       relative: true
     source: path
-    version: "0.1.0"
+    version: "1.0.0"
   web:
     dependency: transitive
     description:

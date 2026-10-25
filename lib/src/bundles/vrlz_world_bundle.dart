@@ -7,6 +7,8 @@ import 'package:vrlizate_world/vrlizate_world.dart';
 import 'vrlz_world_manifest.dart';
 import 'vrz_glb.dart';
 import 'vrz_zip.dart';
+import 'vrlw_audio_policy.dart';
+import 'vrlw_motion_profile.dart';
 
 /// A portable data-only experience. Renderers and Dart code belong to the host;
 /// embedded worlds provide bounded placements, validated models and textures.
@@ -21,6 +23,8 @@ final class VrlzWorldBundle {
   static const maxBytes = 32 * 1024 * 1024;
   static const maxWorldChunks = 64;
   static const maxWorldResources = 8;
+  // A separate, small PCM budget does not increase the model/texture budget.
+  static const maxWorldAudioResources = 1;
   static const maxWorldBindings = 16;
   static const maxModelTriangles = 20000;
   static const maxCellSizeMeters = 128;
@@ -62,7 +66,7 @@ final class VrlzWorldBundle {
         index.cellSizeMeters > maxCellSizeMeters ||
         index.chunks.length > maxWorldChunks ||
         index.chunks.isEmpty ||
-        index.resources.length > maxWorldResources ||
+        !_withinResourceBudget(index) ||
         index.resources.isEmpty ||
         index.prototypeBindings.length > maxWorldBindings ||
         index.prototypeBindings.isEmpty ||
@@ -108,7 +112,9 @@ final class VrlzWorldBundle {
           'file': 'world_main.vrlw',
           'sha256': sha,
           'indexSha256': index.indexSha256,
-          'spawn': [spawnX, 0.0, spawnZ],
+          // Raw places have no experience-level spawn. Start at standing eye
+          // height, not on the ground plane where geometry clips the view.
+          'spawn': [spawnX, 1.6, spawnZ],
           'yaw': 0.0,
         },
       ],
@@ -129,7 +135,7 @@ final class VrlzWorldBundle {
       bytes,
       maxBytes,
       allowedFiles: const {'manifest.json'},
-      maxEntries: 9,
+      maxEntries: VrlzWorldManifest.maxWorlds + 1,
       allowAdditionalFile: isWorldFile,
     );
     final metadata = files['manifest.json']!;
@@ -164,7 +170,7 @@ final class VrlzWorldBundle {
           index.cellSizeMeters > maxCellSizeMeters ||
           index.chunks.length > maxWorldChunks ||
           index.chunks.isEmpty ||
-          index.resources.length > maxWorldResources ||
+          !_withinResourceBudget(index) ||
           index.resources.isEmpty ||
           index.prototypeBindings.length > maxWorldBindings ||
           index.prototypeBindings.isEmpty ||
@@ -229,10 +235,14 @@ final class VrlzWorldBundle {
       size += bytes.length;
     }
     if (size > maxBytes) throw const FormatException('VRLZ exceeds 32 MiB.');
-    final bytes = writeVrzStoreZip({
-      'manifest.json': Uint8List.fromList(metadata),
-      for (final world in checked.worlds) world.file: worldFiles[world.file]!,
-    }, maxBytes);
+    final bytes = writeVrzStoreZip(
+      {
+        'manifest.json': Uint8List.fromList(metadata),
+        for (final world in checked.worlds) world.file: worldFiles[world.file]!,
+      },
+      maxBytes,
+      maxEntries: VrlzWorldManifest.maxWorlds + 1,
+    );
     decode(bytes);
     return bytes;
   }
@@ -243,6 +253,19 @@ final class VrlzWorldBundle {
 
   /// Returns an immutable copy of the `.vrlw` binary for [alias].
   Uint8List worldBytes(String alias) => Uint8List.fromList(_files[alias]!);
+
+  static bool _withinResourceBudget(VrlwBundleIndex index) {
+    final audio = index.resources
+        .where((r) => r.type.startsWith('audio.'))
+        .toList();
+    return index.resources.length - audio.length <= maxWorldResources &&
+        audio.length <= maxWorldAudioResources &&
+        audio.every(
+          (r) =>
+              r.type == 'audio.wav' &&
+              r.unpackedBytes <= VrlwAudioPolicy.maxBytes,
+        );
+  }
 
   /// The full model profile is validated before any prototype is registered or
   /// any GPU resource is created. Region expansion remains demand-driven.
@@ -259,10 +282,17 @@ final class VrlzWorldBundle {
         Uint8List.sublistView(data, start, start + resource.packedBytes),
       );
       if (resource.type == 'model.glb') {
-        validateVrzGlb(decoded, maxSubmittedTriangles: maxModelTriangles);
+        validateVrzGlb(
+          decoded,
+          maxSubmittedTriangles: maxModelTriangles,
+          allowEmbeddedBaseColorTextures: true,
+        );
+      } else if (resource.type.startsWith('audio.')) {
+        VrlwAudioPolicy.validate(decoded);
       }
       resources[resource.id] = decoded;
     }
+    VrlwMotionProfile.validate(index, resources);
     final source = VrlwMemorySource(data);
     try {
       final reader = await VrlwPlaceReader.open(

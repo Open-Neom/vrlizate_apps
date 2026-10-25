@@ -45,6 +45,120 @@ void main() {
     expect(fresh.pose.yaw, .6);
   });
 
+  test('host selection uses authored spawns and keeps each visited pose', () {
+    final session = VrlzWorldSession(bundle);
+    session.updatePose(const VrlzWorldPose(x: 3, y: 1.6, z: 4, yaw: .6));
+    expect(session.selectWorld('gallery'), isTrue);
+    expect(session.currentWorld, 'gallery');
+    // The authored spawn differs from the portal's arrival [4, 1.6, 4].
+    expect(session.pose.position, [2, 1.6, 2]);
+    expect(session.pose.yaw, 0);
+    session.updatePose(const VrlzWorldPose(x: 7, y: 1.6, z: 6, yaw: .9));
+    expect(session.selectWorld('garden'), isTrue);
+    expect(session.pose.position, [3, 1.6, 4]);
+    expect(session.pose.yaw, .6);
+    expect(session.selectWorld('gallery'), isTrue);
+    expect(session.pose.position, [7, 1.6, 6]);
+    expect(session.pose.yaw, .9);
+    expect(session.visits.keys, unorderedEquals(['garden', 'gallery']));
+  });
+
+  test('explicit selection after restore keeps both saved world poses', () {
+    final original = VrlzWorldSession(bundle);
+    original.updatePose(const VrlzWorldPose(x: 3, y: 1.7, z: 3, yaw: .6));
+    original.selectWorld('gallery');
+    original.updatePose(const VrlzWorldPose(x: 6, y: 1.6, z: 4, yaw: 1.2));
+    final fresh = VrlzWorldSession(bundle);
+    expect(fresh.restoreSnapshot(original.encodeSnapshot()), isTrue);
+    expect(fresh.currentWorld, 'gallery');
+    expect(fresh.selectWorld('garden'), isTrue);
+    expect(fresh.pose.position, [3, 1.7, 3]);
+    expect(fresh.pose.yaw, .6);
+    final next = VrlzWorldSession(bundle);
+    expect(next.restoreSnapshot(fresh.encodeSnapshot()), isTrue);
+    expect(next.currentWorld, 'garden');
+    expect(next.selectWorld('gallery'), isTrue);
+    expect(next.pose.position, [6, 1.6, 4]);
+    expect(next.pose.yaw, 1.2);
+  });
+
+  test(
+    'unvisited explicit destination after restore uses its authored spawn',
+    () {
+      final original = VrlzWorldSession(bundle);
+      original.updatePose(const VrlzWorldPose(x: 3, y: 1.6, z: 3, yaw: .6));
+      final fresh = VrlzWorldSession(bundle);
+      expect(fresh.restoreSnapshot(original.encodeSnapshot()), isTrue);
+      expect(fresh.selectWorld('gallery'), isTrue);
+      expect(fresh.pose.position, [2, 1.6, 2]);
+      expect(fresh.selectWorld('garden'), isTrue);
+      expect(fresh.pose.position, [3, 1.6, 3]);
+    },
+  );
+
+  test(
+    'invalid or unchanged host selections leave navigation state intact',
+    () {
+      final session = VrlzWorldSession(bundle);
+      session.selectWorld('gallery');
+      session.updatePose(const VrlzWorldPose(x: 6, y: 1.6, z: 4, yaw: 1.2));
+      final before = VrlzWorldSnapshot.decode(session.encodeSnapshot());
+      for (final alias in [
+        '',
+        '../gallery',
+        'Gallery',
+        'vrlz:test.experience',
+      ]) {
+        expect(session.selectWorld(alias), isFalse, reason: alias);
+        expect(session.currentWorld, 'gallery');
+        expect(session.pose.position, [6, 1.6, 4]);
+      }
+      expect(session.selectWorld('gallery'), isTrue);
+      final after = VrlzWorldSnapshot.decode(session.encodeSnapshot());
+      expect(after['currentWorld'], before['currentWorld']);
+      expect(after['visits'], before['visits']);
+      expect(after['sequence'], before['sequence']);
+    },
+  );
+
+  test('three host destinations retain all six connected portal routes', () {
+    const aliases = ['garden', 'gallery', 'alpine'];
+    final fixture = worldFixture(worldAliases: aliases);
+    fixture.manifest['portals'] = [
+      for (final from in aliases)
+        for (final to in aliases)
+          if (from != to)
+            {
+              'id': '${from}_to_$to',
+              'from': from,
+              'to': to,
+              'position': [2, 1.6, 2],
+              'arrival': [4, 1.6, 4],
+              'yaw': 1,
+              'label': to,
+            },
+    ];
+    final connected = VrlzWorldBundle.decode(
+      VrlzWorldBundle.encode(fixture.manifest, fixture.files),
+    );
+    final session = VrlzWorldSession(connected);
+    for (final portal in connected.manifest.portals) {
+      expect(session.selectWorld(portal.from), isTrue);
+      session.updatePose(const VrlzWorldPose(x: 2, y: 1.6, z: 2, yaw: .7));
+      expect(session.enterPortal(portal.id), isTrue, reason: portal.id);
+      expect(session.currentWorld, portal.to);
+    }
+    expect(connected.manifest.portals, hasLength(6));
+    expect(session.visits.keys, unorderedEquals(aliases));
+    final restored = VrlzWorldSession(connected);
+    expect(restored.restoreSnapshot(session.encodeSnapshot()), isTrue);
+    for (final alias in aliases) {
+      expect(restored.selectWorld(alias), isTrue);
+      expect(restored.pose.position, session.visits[alias]!.position);
+      expect(restored.pose.yaw, session.visits[alias]!.yaw);
+    }
+  });
+
   test('corruption leaves live navigation state unchanged', () {
     final session = VrlzWorldSession(bundle);
     session.enterPortal('to_gallery');

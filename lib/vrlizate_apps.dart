@@ -17,6 +17,7 @@ export 'src/bundles/vrz_bundle_loader.dart';
 export 'src/bundles/vrz_manifest.dart';
 export 'src/catalog/vrlz_web_catalog.dart';
 export 'src/bundles/vrlw_http_source.dart';
+export 'src/bundles/vrlw_audio_policy.dart';
 export 'src/bundles/vrlz_world_manifest.dart';
 export 'src/bundles/vrlz_world_bundle.dart';
 export 'src/bundles/vrlz_world_session.dart';

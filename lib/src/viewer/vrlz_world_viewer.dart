@@ -9,6 +9,8 @@ import 'package:vrlizate_scene/vrlizate_scene.dart';
 
 import '../../vrlizate_apps.dart';
 import 'vrlw_scene_adapter.dart';
+import 'vrlw_world_activity.dart';
+import 'vrlw_world_audio.dart';
 
 /// SDK-owned interpreter for validated local-world data, never downloaded code.
 /// A host supplies durable storage and may provide controller events through
@@ -18,21 +20,31 @@ class VrlzWorldViewer extends StatelessWidget {
     super.key,
     required this.bundle,
     required this.saveStore,
+    this.initialWorld,
     this.onExit,
+    this.audioOutputFactory,
   });
 
   final VrlzWorldBundle bundle;
   final VrlzWorldPersistence saveStore;
+
+  /// Optional explicit, declared destination chosen by the host. The saved
+  /// visits are restored first, then this world's last pose (or authored spawn)
+  /// is selected. Null resumes the saved current world as before.
+  final String? initialWorld;
   final VoidCallback? onExit;
+  final VrlwAudioOutput Function()? audioOutputFactory;
 
   @override
   Widget build(BuildContext context) => VrGpuResourceGate(
     onBack: onExit,
     builder: (_) => _WorldPlayer(
-      key: ObjectKey(bundle),
+      key: ValueKey((bundle, initialWorld)),
       bundle: bundle,
       saveStore: saveStore,
+      initialWorld: initialWorld,
       onExit: onExit,
+      audioOutputFactory: audioOutputFactory,
     ),
   );
 }
@@ -42,11 +54,15 @@ class _WorldPlayer extends StatefulWidget {
     super.key,
     required this.bundle,
     required this.saveStore,
+    this.initialWorld,
     this.onExit,
+    this.audioOutputFactory,
   });
   final VrlzWorldBundle bundle;
   final VrlzWorldPersistence saveStore;
+  final String? initialWorld;
   final VoidCallback? onExit;
+  final VrlwAudioOutput Function()? audioOutputFactory;
   @override
   State<_WorldPlayer> createState() => _WorldPlayerState();
 }
@@ -57,6 +73,10 @@ class _WorldPlayerState extends State<_WorldPlayer>
   late final VrlzWorldSession _session = VrlzWorldSession(widget.bundle);
   VrlzPreparedWorld? _prepared;
   VrlwSceneAdapter? _adapter;
+  VrlwWorldAudio? _audio;
+  final _activities = <String, VrlwWorldActivity>{};
+  final _indicators = <String, fs.PhysicallyBasedMaterial>{};
+  VrlwWorldActivity? get _activity => _adapter?.activity;
   VrInputArbiter? _arbiter;
   Timer? _autosave;
   Object? _error;
@@ -89,15 +109,21 @@ class _WorldPlayerState extends State<_WorldPlayer>
       _arbiter = next;
       _arbiter?.addListener(_onInput);
     }
-    _routeTicking = TickerMode.valuesOf(context).enabled;
+    _routeTicking =
+        TickerMode.valuesOf(context).enabled &&
+        (ModalRoute.isCurrentOf(context) ?? true);
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
     _active =
         _routeTicking &&
-        WidgetsBinding.instance.lifecycleState != AppLifecycleState.paused &&
-        WidgetsBinding.instance.lifecycleState != AppLifecycleState.hidden;
+        (lifecycle == null || lifecycle == AppLifecycleState.resumed);
+    _audio?.setActive(_active && !_loading && !_exiting && _error == null);
   }
 
   void _onInput(VrInputEvent event) {
-    if (!event.handled && event.active && event.type == VrInputType.back) {
+    if (_active &&
+        !event.handled &&
+        event.active &&
+        event.type == VrInputType.back) {
       event.consume();
       unawaited(_exit());
     }
@@ -105,10 +131,8 @@ class _WorldPlayerState extends State<_WorldPlayer>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _active =
-        _routeTicking &&
-        (state == AppLifecycleState.resumed ||
-            state == AppLifecycleState.inactive);
+    _active = _routeTicking && state == AppLifecycleState.resumed;
+    _audio?.setActive(_active && !_loading && !_exiting && _error == null);
     if (!_active && !_loading) unawaited(_save());
   }
 
@@ -117,6 +141,15 @@ class _WorldPlayerState extends State<_WorldPlayer>
       final saved = await widget.saveStore.read(widget.bundle.manifest.id);
       if (!mounted) return;
       if (saved != null && _session.restoreSnapshot(saved)) {
+        _portalsArmed = false;
+      }
+      final destination = widget.initialWorld;
+      if (destination != null) {
+        if (!_session.selectWorld(destination)) {
+          throw FormatException(
+            'Unknown declared world destination: $destination',
+          );
+        }
         _portalsArmed = false;
       }
       _sessionReady = true;
@@ -161,6 +194,12 @@ class _WorldPlayerState extends State<_WorldPlayer>
   Future<void> _openWorld() async {
     final generation = ++_generation;
     bool current() => mounted && generation == _generation;
+    final previousAudio = _audio;
+    _audio = null;
+    previousAudio?.setActive(false);
+    await previousAudio?.dispose();
+    if (!current()) return;
+    _indicators.clear();
     _adapter?.dispose();
     _adapter = null;
     final previous = _prepared;
@@ -168,6 +207,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
     await previous?.reader.close();
     VrlzPreparedWorld? prepared;
     VrlwSceneAdapter? adapter;
+    VrlwWorldAudio? audio;
     try {
       prepared = await widget.bundle.openWorld(_session.currentWorld);
       if (!current()) {
@@ -178,6 +218,10 @@ class _WorldPlayerState extends State<_WorldPlayer>
         prepared.reader,
         prepared.resources,
         isCurrent: current,
+        activity: _activities.putIfAbsent(
+          prepared.reader.index.id,
+          () => VrlwWorldActivity(prepared!.reader.index),
+        ),
       );
       if (!current()) {
         adapter.dispose();
@@ -195,6 +239,34 @@ class _WorldPlayerState extends State<_WorldPlayer>
           return;
         }
       }
+      await _addInteractions(adapter, current);
+      if (!current()) {
+        adapter.dispose();
+        await prepared.reader.close();
+        return;
+      }
+      final factory = widget.audioOutputFactory;
+      if (factory != null && prepared.reader.index.audioEmitters.isNotEmpty) {
+        audio = VrlwWorldAudio(
+          output: factory(),
+          emitters: prepared.reader.index.audioEmitters,
+          resources: prepared.resources,
+        );
+        audio.setActive(false);
+        await audio.initialize();
+        if (!current()) {
+          await audio.dispose();
+          adapter.dispose();
+          await prepared.reader.close();
+          return;
+        }
+        for (final emitter in prepared.reader.index.audioEmitters) {
+          audio.setEmitterEnabled(
+            emitter.id,
+            adapter.activity.audioEnabled(emitter.id),
+          );
+        }
+      }
       final pose = _session.pose;
       _rig.eyeCenter.setValues(pose.x, pose.y, pose.z);
       _lastValidPosition.setFrom(_rig.eyeCenter);
@@ -206,10 +278,13 @@ class _WorldPlayerState extends State<_WorldPlayer>
       setState(() {
         _prepared = prepared;
         _adapter = adapter;
+        _audio = audio;
         _loading = false;
         _error = null;
       });
+      audio?.setActive(_active);
     } catch (error) {
+      await audio?.dispose();
       adapter?.dispose();
       await prepared?.reader.close();
       if (current()) {
@@ -261,6 +336,79 @@ class _WorldPlayerState extends State<_WorldPlayer>
     }
   }
 
+  Future<void> _addInteractions(
+    VrlwSceneAdapter adapter,
+    bool Function() current,
+  ) async {
+    for (final item in adapter.reader.index.interactions) {
+      final material = fs.PhysicallyBasedMaterial()
+        ..metallicFactor = .15
+        ..roughnessFactor = .8
+        ..vertexColorWeight = 0;
+      _indicators[item.id] = material;
+      _setIndicator(material, adapter.activity.indicatorEnabled(item));
+      final position = vm.Vector3.array(item.position);
+      adapter.scene.add(
+        fs.Node(
+            name: 'vrlw_action_${item.id}',
+            mesh: fs.Mesh(
+              fs.CuboidGeometry(vm.Vector3(.42, .24, .16)),
+              material,
+            ),
+          )
+          ..position = position
+          ..shadowCastingMode = fs.ShadowCastingMode.off,
+      );
+      final label = await VrTextLabel.create(
+        '${item.label} · A',
+        center: position + vm.Vector3(0, .30, .1),
+        height: .14,
+        color: const Color(0xffe8fcff),
+        fontSize: 48,
+        maxWidthPx: 768,
+        maxLines: 2,
+      );
+      if (!current()) return;
+      final scale = math.min(1.0, 1.2 / label.worldWidth);
+      label.node.localTransform.scaleByDouble(scale, scale, scale, 1);
+      adapter.scene.add(
+        label.node
+          ..raycastable = false
+          ..shadowCastingMode = fs.ShadowCastingMode.off,
+      );
+    }
+  }
+
+  static void _setIndicator(fs.PhysicallyBasedMaterial material, bool enabled) {
+    material.baseColorFactor = enabled
+        ? vm.Vector4(.06, .56, .4, 1)
+        : vm.Vector4(.22, .25, .28, 1);
+    material.emissiveFactor = enabled
+        ? vm.Vector4(.02, .15, .09, 0)
+        : vm.Vector4.zero();
+  }
+
+  String? _actionId(fs.Node node) => node.name.startsWith('vrlw_action_')
+      ? node.name.substring('vrlw_action_'.length)
+      : null;
+
+  void _select(fs.Node node) {
+    if (!_active || _loading || _exiting || _error != null) return;
+    final id = _actionId(node);
+    if (id == null) {
+      unawaited(_travel(node));
+      return;
+    }
+    final item = _activity?.activate(id, _rig.eyeCenter);
+    if (item == null) return;
+    final enabled = _activity!.indicatorEnabled(item);
+    final indicator = _indicators[item.id];
+    if (indicator != null) _setIndicator(indicator, enabled);
+    if (item.action == 'toggleAudio') {
+      _audio?.setEmitterEnabled(item.target, enabled);
+    }
+  }
+
   VrlzWorldPortal? _portalFor(fs.Node node) {
     for (final portal in widget.bundle.manifest.portals) {
       if (portal.from == _session.currentWorld &&
@@ -272,6 +420,11 @@ class _WorldPlayerState extends State<_WorldPlayer>
   }
 
   bool _canSelect(fs.Node node) {
+    if (!_active || _loading || _exiting || _error != null) return false;
+    final action = _actionId(node);
+    if (action != null) {
+      return _activity?.canActivate(action, _rig.eyeCenter) ?? false;
+    }
     final portal = _portalFor(node);
     return portal == null ||
         (!_loading &&
@@ -286,6 +439,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
     if (portal == null || !_canSelect(node)) return;
     _capturePose();
     if (!_session.enterPortal(portal.id)) return;
+    _audio?.setActive(false);
     setState(() {
       _loading = true;
       _portalsArmed = false;
@@ -297,13 +451,14 @@ class _WorldPlayerState extends State<_WorldPlayer>
   void _failAfterFrame(Object error, int generation) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && generation == _generation && _error == null) {
+        _audio?.setActive(false);
         setState(() => _error = error);
       }
     });
   }
 
   void _tick(Duration _, double dt) {
-    if (_loading || _exiting || _error != null) return;
+    if (!_active || _loading || _exiting || _error != null) return;
     try {
       // Keyboard fallback for creator testing. VR controllers use the shared
       // SDK arbiter and StereoSceneView's locomotion policy.
@@ -348,6 +503,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
         _portalsArmed = true;
       }
       _adapter?.update(_rig.eyeCenter, dt);
+      _audio?.update(listenerPosition: _rig.eyeCenter, listenerYaw: _rig.yaw);
     } catch (error) {
       _failAfterFrame(error, _generation);
     }
@@ -356,8 +512,10 @@ class _WorldPlayerState extends State<_WorldPlayer>
   Future<void> _exit() async {
     if (_exiting) return;
     _exiting = true;
+    _audio?.setActive(false);
     if (!await _save()) {
       _exiting = false;
+      _audio?.setActive(_active);
       return;
     }
     if (!mounted) return;
@@ -382,6 +540,8 @@ class _WorldPlayerState extends State<_WorldPlayer>
     _autosave?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _arbiter?.removeListener(_onInput);
+    _audio?.setActive(false);
+    unawaited(_audio?.dispose());
     _adapter?.dispose();
     unawaited(_prepared?.reader.close());
     super.dispose();
@@ -419,7 +579,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
                   enableHandTracking: false,
                   onTick: _tick,
                   gazeFilter: _canSelect,
-                  onGazeSelect: (node) => unawaited(_travel(node)),
+                  onGazeSelect: _select,
                 ),
               if (_loading) const Center(child: CircularProgressIndicator()),
               if (_error != null)

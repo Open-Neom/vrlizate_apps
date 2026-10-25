@@ -5,8 +5,15 @@ import 'package:archive/archive.dart' show getCrc32;
 
 /// Deterministic STORE encoder matching this reader's bounded ZIP subset.
 /// No dependency on a ZIP library's descriptor/ZIP64 encoder defaults.
-Uint8List writeVrzStoreZip(Map<String, Uint8List> files, int maxBytes) {
-  if (files.isEmpty || files.length > 9) {
+Uint8List writeVrzStoreZip(
+  Map<String, Uint8List> files,
+  int maxBytes, {
+  int maxEntries = 9,
+}) {
+  if (maxEntries < 1 ||
+      maxEntries > 65535 ||
+      files.isEmpty ||
+      files.length > maxEntries) {
     throw const FormatException('Invalid STORE archive file count.');
   }
   final local = BytesBuilder(copy: false);

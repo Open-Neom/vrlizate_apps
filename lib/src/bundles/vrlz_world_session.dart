@@ -64,6 +64,33 @@ final class VrlzWorldSession {
   VrlzWorldPose get pose => _visits[_currentWorld]!;
   Map<String, VrlzWorldPose> get visits => Map.unmodifiable(_visits);
 
+  /// Opens a declared destination selected explicitly by the host, e.g. a Home
+  /// storefront. A previous visit keeps its pose; a first visit uses the world's
+  /// authored spawn and heading. This does not add a portal or interpret a route.
+  /// Unknown destinations or invalid placements return false without changing
+  /// the current world, visits or save sequence.
+  bool selectWorld(String alias) {
+    VrlzWorldEntry? target;
+    for (final world in bundle.manifest.worlds) {
+      if (world.alias == alias) target = world;
+    }
+    if (target == null) return false;
+    final nextPose =
+        _visits[alias] ??
+        VrlzWorldPose(
+          x: target.spawn[0],
+          y: target.spawn[1],
+          z: target.spawn[2],
+          yaw: target.yaw,
+        );
+    if (!bundle.containsPosition(alias, nextPose.position)) return false;
+    if (_currentWorld == alias) return true;
+    _visits.putIfAbsent(alias, () => nextPose);
+    _currentWorld = alias;
+    _sequence++;
+    return true;
+  }
+
   /// Yaw can accumulate during movement; normalize before durable validation.
   void updatePose(VrlzWorldPose value) {
     if (!value.yaw.isFinite) throw const FormatException('Invalid pose yaw.');

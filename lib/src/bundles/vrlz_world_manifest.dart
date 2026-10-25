@@ -13,8 +13,11 @@ final class VrlzWorldManifest {
   );
 
   static const runtime = 'vrlizate.worlds.v1';
-  static const maxWorlds = 8;
-  static const maxPortals = 32;
+  // Only the selected world prepares GPU resources; the archive still has a
+  // 32 MiB aggregate cap. Catalog capacity is independent of the selected
+  // world's unchanged resident-region, geometry and texture budgets.
+  static const maxWorlds = 32;
+  static const maxPortals = 64;
   final String id, title, description, revision, entrypoint;
   final List<VrlzWorldEntry> worlds;
   final List<VrlzWorldPortal> portals;

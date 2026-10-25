@@ -174,7 +174,7 @@ final class VrlzPackage {
       bytes,
       maxBytes,
       allowManifestOnly: true,
-      maxEntries: 9,
+      maxEntries: VrlzWorldManifest.maxWorlds + 1,
       maxManifestBytes: VrlzWebGameManifest.maxIndexBytes,
       allowAdditionalFile: VrlzWorldBundle.isWorldFile,
       allowedFiles: const {

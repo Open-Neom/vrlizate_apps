@@ -27,6 +27,114 @@ void main() {
     },
   );
 
+  test('32 connected worlds open lazily; a 33rd is rejected', () async {
+    for (final count in [16, 22, 32, 33]) {
+      final aliases = List.generate(count, (i) => 'place_$i');
+      final fixture = worldFixture(worldAliases: aliases);
+      fixture.manifest['entrypoint'] = aliases.first;
+      fixture.manifest['portals'] = [
+        for (var i = 0; i < count; i++) ...[
+          {
+            'id': 'next_$i',
+            'from': aliases[i],
+            'to': aliases[(i + 1) % count],
+            'position': [3, 1.6, 2],
+            'arrival': [4, 1.6, 4],
+            'yaw': 0,
+            'label': 'Next place',
+          },
+          {
+            'id': 'previous_$i',
+            'from': aliases[i],
+            'to': aliases[(i + count - 1) % count],
+            'position': [1, 1.6, 2],
+            'arrival': [4, 1.6, 4],
+            'yaw': 0,
+            'label': 'Previous place',
+          },
+        ],
+      ];
+      final bytes = uncheckedWorldArchive(fixture.manifest, fixture.files);
+      if (count == 33) {
+        expect(() => VrlzWorldBundle.decode(bytes), throwsFormatException);
+        expect(() => VrlzPackage.decode(bytes), throwsFormatException);
+        expect(
+          () => VrlzWorldManifest.fromJson(fixture.manifest),
+          throwsFormatException,
+        );
+        continue;
+      }
+      final publicPackage = VrlzPackage.decode(bytes);
+      expect(publicPackage.kind, VrlzPackageKind.worlds);
+      expect(
+        VrlzPackage.decode(publicPackage.encode()).worldBundle!.manifest.worlds,
+        hasLength(count),
+      );
+      final bundle = publicPackage.worldBundle!;
+      expect(bundle.manifest.worlds, hasLength(count));
+      expect(bundle.manifest.portals, hasLength(count * 2));
+      final last = await bundle.openWorld(aliases.last);
+      try {
+        expect(last.reader.index.id, 'test.place_${count - 1}');
+        expect(last.resources['floor.model'], triangleGlb());
+      } finally {
+        await last.reader.close();
+      }
+      expect(
+        VrlzWorldBundle.decode(
+          VrlzWorldBundle.encode(fixture.manifest, fixture.files),
+        ).manifest.worlds,
+        hasLength(count),
+      );
+      final session = VrlzWorldSession(bundle);
+      for (final alias in aliases) {
+        expect(session.selectWorld(alias), isTrue);
+      }
+      final restored = VrlzWorldSession(bundle);
+      expect(restored.restoreSnapshot(session.encodeSnapshot()), isTrue);
+      expect(restored.currentWorld, aliases.last);
+      expect(restored.visits, hasLength(count));
+    }
+  });
+
+  test('portal capacity remains bounded independently of world capacity', () {
+    final fixture = worldFixture();
+    final template = Map<String, dynamic>.from(fixture.manifest['portals'][0]);
+    for (final count in [64, 65]) {
+      fixture.manifest['portals'] = [
+        for (var i = 0; i < count; i++) {...template, 'id': 'portal_$i'},
+      ];
+      final bytes = uncheckedWorldArchive(fixture.manifest, fixture.files);
+      if (count == 64) {
+        expect(VrlzWorldBundle.decode(bytes).manifest.portals, hasLength(64));
+      } else {
+        expect(() => VrlzWorldBundle.decode(bytes), throwsFormatException);
+        expect(
+          () => VrlzWorldBundle.encode(fixture.manifest, fixture.files),
+          throwsFormatException,
+        );
+      }
+    }
+  });
+
+  test(
+    'standalone VRLW opens above the floor without inventing portals',
+    () async {
+      final fixture = worldFixture();
+      final bundle = VrlzWorldBundle.fromRawVrlw(
+        fixture.files['world_garden.vrlw']!,
+      );
+      expect(bundle.manifest.world('main').spawn, [6, 1.6, 6]);
+      expect(bundle.manifest.portals, isEmpty);
+      final prepared = await bundle.openWorld('main');
+      try {
+        expect(prepared.reader.index.id, 'test.garden');
+      } finally {
+        await prepared.reader.close();
+      }
+    },
+  );
+
   final invalid = <String, void Function(Map<String, dynamic>)>{
     'future format': (m) => m['formatVersion'] = 2,
     'float format': (m) => m['formatVersion'] = 1.0,

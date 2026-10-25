@@ -222,7 +222,7 @@ ni convierte mapas, personajes o sprites de Mega Man o Super Mario.** Las
 mecánicas generales de plataformas/disparos permiten experiencias propias,
 con autoría, identidad visual y contenido independientes.
 
-## Subconjunto GLB admitido
+## Subconjunto GLB de escenas admitido
 
 `scene.glb` debe ser GLB 2.0, con longitud declarada exacta y exactamente dos bloques alineados: JSON y BIN. Debe tener un único buffer incorporado. No se admiten claves `uri`, ni siquiera `data:`: el formato completo glTF sí admite recursos externos, pero el perfil de escena v1 no los admite. Tampoco se aceptan imágenes, texturas, samplers, skins, animaciones, cámaras glTF, morph targets, accessors dispersos ni decodificadores de extensiones. La única extensión admitida es `KHR_materials_unlit`.
 
@@ -244,7 +244,212 @@ Límites adicionales del validador:
 
 Se comprueban los rangos de buffers, strides y accessors; los índices no pueden apuntar fuera de la malla. Se rechazan ciclos, nodos con varios padres, raíces inválidas, transformaciones no finitas y cuaterniones no normalizados. Las matrices deben ser afines y no coexistir con TRS. La validación reduce entradas malformadas y consumo excesivo, pero no constituye una garantía de ausencia de defectos en los parsers o controladores gráficos del anfitrión.
 
-Las imágenes están excluidas expresamente para evitar que imágenes codificadas pequeñas provoquen asignaciones enormes al descomprimirse. Soportarlas en otra versión requiere presupuestos de dimensiones, píxeles, memoria y formatos, además del límite del ZIP.
+Las imágenes siguen excluidas del perfil de escena `vrlizate.scene.v1`, tanto
+con extensión `.vrlz` como en escenas heredadas `.vrz`. El permiso siguiente es
+exclusivo del perfil de mundos y no relaja `VrzBundle` ni el visor de escenas.
+
+### PNG embebido en modelos de mundos, v1 beta
+
+`VrlzWorldBundle.openWorld` habilita explícitamente
+`validateVrzGlb(..., allowEmbeddedBaseColorTextures: true)`. El valor por defecto
+del validador sigue siendo `false`. Este subconjunto de `vrlizate.worlds.v1`
+permite `pbrMetallicRoughness.baseColorTexture` con PNG almacenado en un
+`images[].bufferView` del mismo BIN del GLB; no acepta URI externa ni `data:`.
+El contenedor continúa siendo **VRLW/VRLZ v1 beta**. Los hosts beta anteriores
+rechazan estos modelos hasta actualizar su validador y consumidor; conservar la
+extensión y la versión de formato no implica que un host anterior los admita.
+
+| Recurso por modelo GLB de mundo | Límite |
+| --- | --- |
+| Imágenes / texturas / samplers | 4 de cada uno |
+| Lado de cada PNG | 1–256 píxeles |
+| Memoria base RGBA8 estimada | 1 MiB, tanto imágenes como entradas de textura |
+| Codificación PNG | RGB8 o RGBA8, estática, sin interlace |
+| Canal y atributos | `texCoord: 0` y `TEXCOORD_0` VEC2, mismo número de vértices que POSITION |
+| Valores UV | Float32 finitos con valor absoluto ≤ 4096, o uint8/uint16 normalizados |
+
+La autoría original de la biblioteca produce actualmente PNG **RGB8 de
+128 × 128**, por debajo del límite de admisión de 256. Los índices de imagen,
+textura, sampler y material se comprueban antes de registrar los prototipos.
+La vista de imagen debe estar dentro del buffer y no puede declarar stride.
+
+El mismo preflight PNG de `VrlwBundleCodec.validatePngTextureBytes` sirve a los
+recursos independientes y al GLB. Para este perfil se usa `requireComplete:
+true, maxDimension: 256`: primero limita dimensiones, comprueba cabecera,
+rangos, secuencia de chunks y CRC, rechaza APNG y chunks críticos no admitidos;
+después infla IDAT con `VrlwBoundedOutput` a exactamente
+`height * (1 + width * channels)` bytes. Comprueba el Adler de zlib y los filtros
+0–4 sin reconstruir píxeles ni convertir color. Así una salida excesiva se
+rechaza antes de copiarla fuera del presupuesto. El renderer realiza la
+decodificación final; si falla el importador, el adaptador rechaza la apertura
+en vez de presentar una textura blanca de sustitución.
+
+Los UV float pueden ser negativos o mayores que uno: el perfil no los recorta
+a `[0,1]`. Los samplers admiten los enums glTF de repetición/clamp y filtros
+nearest/linear, incluidos los filtros con mipmaps. La autoría utiliza
+`wrapS/wrapT: 10497` (REPEAT), `magFilter: 9729` y `minFilter: 9987`
+(LINEAR_MIPMAP_LINEAR). El importador de Flutter Scene aplica esos samplers a
+la textura y solicita mipmaps; el backend puede desactivarlos si su prueba de
+muestreo no los soporta. Declararlos en JSON no demuestra su ejecución en una
+GPU concreta. No se permiten `KHR_texture_transform`, otros canales UV ni
+texturas normales, metallic-roughness, emisivas u oclusión embebidas por esta
+excepción. Las vinculaciones de recursos del índice `.vrlw` conservan su
+contrato separado.
+
+`VrlwSceneAdapter` importa cada recurso GLB una vez por mundo y reutiliza
+geometría, texturas y materiales entre las instancias de regiones y las dos
+vistas del mismo escenario. Conserva también la textura original de los
+materiales unlit; una vinculación que sobrescribe un mapa obtiene un material
+compartido por esa combinación. No se deduplican globalmente PNG iguales
+incluidos en recursos GLB diferentes. Ambos ojos siguen dibujando su propia
+vista, aunque compartan esos recursos.
+
+Una cadena completa de mipmaps de un mapa cuadrado RGBA8 cuesta aproximadamente
+4/3 de su nivel base. El máximo admitido por modelo sería aproximadamente
+**1,33 MiB** con mipmaps, o **10,67 MiB** para ocho modelos de un mundo. Es una
+estimación de las texturas; no incluye geometría, buffers de render estéreo,
+lecturas temporales ni memoria total del proceso, y no es una medición GPU o
+una promesa de FPS. El presupuesto no sonoro sigue siendo de ocho recursos por
+mundo; el PNG embebido no agrega entradas al índice. El perfil ambiental descrito
+abajo permite además un único WAV acotado, dentro de los mismos 32 MiB por paquete.
+
+
+## Movimiento, controles y audio de mundos, v1 beta
+
+Esta ampliación pertenece exclusivamente a `vrlizate.worlds.v1` y a su índice
+`.vrlw`. Mantiene `VRLW0001`, `schemaVersion: 1` y `formatVersion: 1`; no declara
+un formato v2 ni habilita estas funciones en escenas VRZ/`vrlizate.scene.v1`.
+Los lectores beta anteriores rechazan los campos nuevos. El host debe actualizar
+su SDK antes de admitirlos. El [contrato de World](../../vrlizate_world/doc/vrlw_format.md#movimiento-e-interacciones-declarativos)
+detalla los campos, límites y validaciones del codec puro Dart.
+
+Un fragmento del índice o fuente de un mundo es:
+
+```json
+{
+  "motions": [{
+    "id": "courtyard.rotor", "prototypeId": "campus.landmark",
+    "node": "rotor", "kind": "spin", "axis": "y",
+    "pivot": [0, 3.2, 0], "periodSeconds": 12,
+    "rangeMeters": 32, "initiallyEnabled": true
+  }],
+  "interactions": [{
+    "id": "courtyard.switch", "label": "Rotor del patio",
+    "position": [17, 1.2, 13], "maxDistance": 3,
+    "action": "toggleMotion", "target": "courtyard.rotor"
+  }]
+}
+```
+
+El fragmento requiere que el prototipo y su GLB estén vinculados y que la posición
+esté dentro de una región declarada. `VrlwMotionSpec` y `VrlwInteractionSpec`
+son datos inmutables expuestos por `VrlwBundleIndex.motions`/`interactions`.
+Los arrays vacíos se omiten al compilar, conservando los bytes de paquetes que
+no utilizan esta ampliación.
+
+### Admisión y ejecución de movimientos
+
+Se admiten como máximo **ocho motions y ocho controles**. `spin` completa una
+vuelta positiva cada 2–120 segundos sobre un eje local `x`, `y` o `z`; `bob`
+desplaza una malla con una senoide del mismo periodo y amplitud de 0,001–0,5 m.
+El pivote está acotado a ±32 m del modelo; `rangeMeters` admite 4–48 m, por
+defecto 32. Dos motions no pueden controlar el mismo `(prototypeId, node)`.
+
+`VrlwMotionProfile` se ejecuta en `openWorld` después del validador GLB general y
+antes de cualquier importación nativa o creación GPU. El nombre debe resolver
+exactamente un nodo del documento, incluso contando nodos inactivos. Debe tener
+malla, no hijos, estar directamente en la escena activa y omitir `matrix`,
+`translation`, `rotation` y `scale` (identidad implícita). Un nodo transformado,
+un grupo padre o un nodo de otra escena no se animan de manera ambigua: el
+paquete se rechaza. No se admiten skins, clips glTF, scripts, física móvil ni
+comportamiento descargado.
+
+Las transformaciones se aplican en orden `pose de entidad × delta local × modelo`;
+la geometría y el material permanecen compartidos. Cada grupo de material de
+una malla móvil consume una instancia de primitiva móvil por entidad residente.
+El máximo es **16**, contando también instancias pausadas o lejanas, y se
+verifica antes de cambiar instancias GPU. Sigue vigente el máximo residente de
+128 entidades, 256 primitivas y 80 000 triángulos por escena/ojo. Instancing
+reduce duplicación de recursos, pero no elimina el coste de dibujar instancias.
+
+El adaptador actualiza las transformaciones a un máximo de **30 Hz**. Un track
+avanza mientras haya una instancia residente dentro de su radio; las instancias
+lejanas no reciben actualizaciones. Instancias del mismo motion comparten fase.
+Al desactivarlo conserva la pose; al volver a activarlo continúa, con saltos de
+tiempo acotados en reanudación. Esto no establece el FPS de render, que depende
+del dispositivo, escena y backend; no se ha medido una mejora de FPS con estas
+pruebas.
+
+### Interacciones cercanas y estado local
+
+`toggleMotion` referencia un ID de motion y `toggleAudio` un ID de emisor. No
+hay URLs, permisos, clases ni callbacks descargados. El codec exige referencias
+válidas, texto de etiqueta de hasta 80 caracteres y posición finita dentro de
+una región declarada. La distancia de activación es de 0,25–4 m (por defecto
+3 m), en las tres dimensiones. Mirada, botón A y tap comparten la selección
+compilada del visor, con cooldown de 0,4 segundos por control. Los indicadores
+reflejan el estado aceptado, no una intención fuera de alcance.
+
+El visor retiene los toggles y la fase por mundo al recorrer portales. Este
+estado dura solamente la instancia de `VrlzWorldViewer`: no modifica archivos,
+no se sincroniza entre usuarios y no forma parte del snapshot persistente de
+pose/visitas. Cerrar o crear otro visor restaura los valores iniciales. La
+reproducción de una muestra no promete conservar su posición exacta al reabrir
+un mundo.
+
+### WAV canónico y salida de audio del host
+
+El perfil móvil permite **ocho recursos no sonoros más un recurso `audio.wav`**.
+Por ejemplo, ocho GLB con PNG embebido más un WAV. Las texturas externas sí
+consumen el presupuesto de ocho. Un noveno modelo o un segundo audio se rechaza,
+aunque el total quepa en el contenedor. El límite global sigue siendo 32 MiB.
+
+`VrlwAudioPolicy` comprueba antes de GPU/carga nativa:
+
+| Propiedad del WAV | Valor admitido |
+| --- | --- |
+| Contenedor | RIFF/WAVE canónico: `fmt ` PCM de 16 bytes y `data`, sin chunks extra |
+| Formato | PCM entero, un canal mono, 16 bits, blockAlign 2 |
+| Sample rate | 16 000 o 22 050 Hz; byteRate exactamente rate × 2 |
+| Archivo completo | Máximo 256 KiB |
+| Duración PCM | Más de cero y como máximo 8 s; ambos límites se aplican juntos |
+| Longitudes | RIFF y data exactos; datos pares y no vacíos |
+
+Por el límite de bytes, no todos los WAV de ocho segundos a 22 050 Hz caben.
+OGG, MP3, estéreo, float PCM y cabeceras no canónicas permanecen fuera de este
+perfil, aunque el codec general de World conozca otros tipos `audio.*`.
+Los `audioEmitters` existentes definen posición, volumen, radio y loop;
+comienzan habilitados y no incorporan un campo nuevo `initiallyEnabled`.
+
+`VrlzWorldViewer(audioOutputFactory: ...)` acepta una factory de
+`VrlwAudioOutput`. Sin ella, el visor no crea reproducción nativa. El controlador
+`VrlwWorldAudio` carga una única fuente validada y selecciona hasta **dos voces**,
+con ganancia atenuada por distancia y pan estéreo relativo a la cabeza. Coalesce
+las actualizaciones a **10 Hz** y limita operaciones pendientes; no es HRTF.
+En VRlizate, `NeomVrlwAudioOutput` reutiliza el servicio compartido
+`neom_sound`/SoLoud, carga solo bytes locales y libera únicamente las voces y
+fuentes que posee, sin desinicializar el motor global.
+
+Audio y animación se suspenden al perder foco, ocultar la ruta o salir del
+visor. El audio anterior se suspende antes de esperar el guardado al cruzar un
+portal. Fallos o timeouts de reproducción deshabilitan el audio sin retener el
+mundo ni impedir liberar la escena.
+
+### Evidencia de pruebas
+
+El 25 de octubre de 2026 pasaron 47 casos nuevos de contrato en
+`vrlizate_world/test/vrlw_behaviors_test.dart`; el lote con recursos y contenedor
+sumó 84. En Apps pasaron 42 casos de actividad/perfil, incluidos en el lote de
+94 de bundle, sesión, persistencia y geometría. Otros siete casos de
+`vrlw_motion_budget_test.dart` llevan esa ronda a **101 pruebas Apps**, sin contar
+otra vez los 42. Cubren pivotes/ejes, senoide, pausa/distancia, dt inválido,
+proximidad, cooldown, toggles, admisión de ocho GLB más un WAV y rechazos de
+nodos, límites y PCM. La salida de audio SDK/host tiene sus pruebas separadas.
+
+Estas pruebas verifican lógica, presupuesto y admisión antes de GPU; no miden
+FPS, temperatura, calidad sonora ni presentación visual en teléfono. La
+[guía de mundos vivos de la biblioteca](https://github.com/Open-Neom/codebase_vrlw/blob/main/docs/LIVING_WORLDS_MOBILE.md)
+recoge la autoría de ejemplos; su validación debe distinguirse del render móvil.
 
 ## API y transporte
 
@@ -385,7 +590,10 @@ Flutter compila Dart de las aplicaciones móviles release a código nativo AOT. 
 
 Una futura aplicación declarativa podría añadir escenas, navegación, eventos y acciones mediante un intérprete limitado y versionado incluido en Apps. HTML/JavaScript en WebView sería otro runtime, con aislamiento, origen, puente de APIs y reglas de tienda propios; no equivale a cargar widgets Flutter nativos. Apple establece restricciones sobre código descargado y contempla determinadas miniapps HTML5/JavaScript bajo condiciones adicionales; Google Play restringe la descarga externa de ejecutables nativos y trata de manera diferente cierto código interpretado. La aceptación en tiendas requiere evaluar la implementación concreta y las reglas vigentes, no solo la extensión `.vrlz`.
 
-Posibles ampliaciones futuras —DEFLATE, texturas, recursos adicionales, firma del autor, UI declarativa o un runtime web— necesitan una nueva versión/capacidad, límites y pruebas. Un lector v1 debe rechazarlas hasta que su anfitrión las implemente.
+Las ampliaciones fuera de los subconjuntos descritos requieren un contrato,
+límites y pruebas explícitos en el host. El soporte PNG del perfil de mundos
+no habilita texturas en escenas VRZ, nuevos formatos de imagen, ejecutables ni
+permisos adicionales. Un lector que no implemente una capacidad debe rechazarla.
 
 ## Referencias oficiales
 
@@ -397,3 +605,14 @@ Posibles ampliaciones futuras —DEFLATE, texturas, recursos adicionales, firma 
 - [Apple App Review Guidelines, 2.5.2 y 4.7](https://developer.apple.com/app-store/review/guidelines/): reglas de código descargado y miniapps.
 - [Política de Google Play sobre abuso de dispositivos y redes](https://support.google.com/googleplay/android-developer/answer/18258653?hl=en): distribución de ejecutables y código interpretado.
 - [Contenido local en Android WebView](https://developer.android.com/develop/ui/views/layout/webapps/load-local-content): referencia para un eventual runtime web con origen controlado.
+
+### Presupuesto de mundos conectados, beta del 25 de octubre de 2026
+
+El runtime `vrlizate.worlds.v1` admite hasta **32 mundos y 64 portales** por
+paquete, con el mismo límite total de **32 MiB**. Sólo se preparan los recursos
+del mundo seleccionado. Cada mundo conserva sus límites de 64 regiones, ocho
+recursos no sonoros, un WAV canónico adicional y el presupuesto del adaptador
+de escena (incluidas 16 primitivas móviles como máximo). Los hosts beta anteriores
+que limitan el paquete a ocho o dieciséis mundos rechazarán una colección mayor: actualizar
+el SDK o distribuir los `.vrlw` independientes. El formato sigue en v1 beta;
+no hay código Dart ejecutable dentro del contenedor.
