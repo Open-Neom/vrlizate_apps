@@ -15,6 +15,7 @@ import 'support/nes_fixture.dart';
 import 'support/retro_fixture.dart';
 import 'support/vrlz_world_fixture.dart';
 import 'support/vrz_fixture.dart';
+import 'support/web_game_fixture.dart';
 
 void main() {
   test(
@@ -78,6 +79,9 @@ void main() {
       fixtureNes(),
       fixtureRetro(),
       fixtureWorlds(),
+      storeZip([
+        ZipFixtureEntry('manifest.json', utf8.encode(jsonEncode(webGameJson()))),
+      ]),
     ].map((bytes) => VrlzPackage.decode(bytes).kind).toSet();
     expect(kinds, VrlzPackageKind.values.toSet());
     expect(() => VrzBundle.decode(fixtureNes()), throwsFormatException);

@@ -3,7 +3,6 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vrlizate_apps/vrlizate_apps.dart';
-import 'package:vrlizate_apps/src/bundles/vrlw_audio_policy.dart';
 
 import 'support/vrlz_world_fixture.dart';
 import 'support/vrz_fixture.dart';

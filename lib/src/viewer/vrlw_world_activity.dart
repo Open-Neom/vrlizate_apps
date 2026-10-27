@@ -3,6 +3,8 @@ import 'dart:math' as math;
 import 'package:vector_math/vector_math.dart' as vm;
 import 'package:vrlizate_world/vrlizate_world.dart';
 
+import 'vrlw_path_sampler.dart';
+
 /// Bounded interpretation of a world's validated actions; never executable code.
 /// The viewer may retain this object across portal visits. State is local to
 /// that viewer session; it does not change the immutable world or shared mesh.
@@ -13,14 +15,24 @@ final class VrlwWorldActivity {
       _motionEnabled = {
         for (final m in index.motions) m.id: m.initiallyEnabled,
       },
-      _audioEnabled = {for (final a in index.audioEmitters) a.id: true};
+      _audioEnabled = {for (final a in index.audioEmitters) a.id: true},
+      _paths = {
+        for (final m in index.motions)
+          if (m.kind == 'path') m.id: VrlwPathSampler(m.waypoints),
+      };
 
   final Map<String, VrlwMotionSpec> motions;
   final Map<String, VrlwInteractionSpec> interactions;
   final Map<String, bool> _motionEnabled, _audioEnabled;
+  final Map<String, VrlwPathSampler> _paths;
   final _phase = <String, double>{};
   final _lastActivation = <String, double>{};
   double _clock = 0;
+
+  /// Retained across portal visits, frozen while this world is inactive.
+  double get activeSeconds => _clock;
+
+  VrlwPathSampler? pathFor(String id) => _paths[id];
 
   bool motionEnabled(String id) => _motionEnabled[id] ?? false;
   bool audioEnabled(String id) => _audioEnabled[id] ?? false;
@@ -70,9 +82,24 @@ final class VrlwWorldActivity {
 
   /// Model-space delta around the authored pivot, before the entity pose.
   vm.Matrix4 delta(String id) {
-    final m = motions[id]!;
-    final phase = (_phase[id] ?? 0) * 2 * math.pi / m.periodSeconds;
     final transform = vm.Matrix4.identity();
+    writeDelta(id, transform);
+    return transform;
+  }
+
+  /// Hot-loop variant: all storage belongs to the resident animated instance.
+  void writeDelta(String id, vm.Matrix4 transform) {
+    final m = motions[id]!;
+    if (m.kind == 'path') {
+      _paths[id]!.writeTransform(
+        (_phase[id] ?? 0) / m.periodSeconds + m.phaseOffset,
+        transform,
+        orient: m.orientToPath,
+      );
+      return;
+    }
+    final phase = (_phase[id] ?? 0) * 2 * math.pi / m.periodSeconds;
+    transform.setIdentity();
     if (m.kind == 'bob') {
       final distance = (m.amplitude ?? 0) * math.sin(phase);
       transform.setTranslationRaw(
@@ -92,6 +119,5 @@ final class VrlwWorldActivity {
       }
       transform.translateByDouble(-m.pivot[0], -m.pivot[1], -m.pivot[2], 1);
     }
-    return transform;
   }
 }

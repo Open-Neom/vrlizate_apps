@@ -8,6 +8,7 @@ import 'package:vrlizate_world/vrlizate_world.dart';
 
 import '../bundles/vrz_glb.dart';
 import 'vrlw_world_activity.dart';
+import 'vrlw_day_night.dart';
 
 /// GPU projection of a prepared portable world. The caller validates GLB data
 /// with the Apps profile before passing resources here, and owns the reader.
@@ -40,6 +41,10 @@ class VrlwSceneAdapter {
   bool _dirty = true, _disposed = false;
   double _maintenance = 0;
   double _motionAccumulator = 0;
+  double _lightingAccumulator = 0;
+  VrlwDayNightLighting? _dayNight;
+  fs.GradientSkySource? _cycleSky;
+  final _nearbyMotions = <String>{};
   final _moving = <_MovingInstance>[];
   static const maxMovingPrimitiveInstances = 16;
   static const maxVisibleEntities = 128;
@@ -234,6 +239,25 @@ class VrlwSceneAdapter {
           intensity: env?.sunIntensity ?? 2.5,
           castsShadow: env?.castsShadows ?? false,
         );
+      final cycle = env?.dayNightCycle;
+      if (cycle != null) {
+        // A constant diffuse floor is cheap and needs no additional GPU bake.
+        // An explicitly authored environment remains the lighting source.
+        if (env?.environmentResource == null) {
+          adapter.scene.environment = fs.EnvironmentMap.constantDiffuse(
+            vm.Vector3(.22, .25, .32),
+          );
+        }
+        adapter._dayNight = VrlwDayNightLighting(
+          cycle,
+          baseSunIntensity: env?.sunIntensity ?? 2.5,
+          baseEnvironmentIntensity: env?.environmentIntensity ?? 1,
+          baseExposure: env?.exposure ?? 1,
+        );
+        adapter._cycleSky = fs.GradientSkySource();
+        adapter.scene.skybox = fs.Skybox(adapter._cycleSky!);
+        adapter._updateLighting(force: true);
+      }
       return adapter;
     } catch (_) {
       adapter.dispose();
@@ -292,12 +316,17 @@ class VrlwSceneAdapter {
                   .multiplied(part.transform);
         final slot = part.mesh.addInstance(actual);
         if (motion != null) {
+          final path = activity.pathFor(motion.id);
+          final center = path?.boundsCenter ?? vm.Vector3.array(motion.pivot);
           _moving.add(
             _MovingInstance(
               part,
               slot,
               transform,
-              transform.transformed3(vm.Vector3.array(motion.pivot)),
+              transform.transformed3(center),
+              motion.rangeMeters +
+                  (path?.boundsRadius ?? motion.amplitude?.abs() ?? 0) *
+                      pose.scale.abs(),
             ),
           );
         }
@@ -307,33 +336,53 @@ class VrlwSceneAdapter {
   }
 
   void _updateMotion(vm.Vector3 eye, double dt) {
-    final nearby = <String>{};
+    final nearby = _nearbyMotions..clear();
     for (final moving in _moving) {
       final m = moving.part.motion!;
-      if (eye.distanceToSquared(moving.center) <=
-          m.rangeMeters * m.rangeMeters) {
+      if (eye.distanceToSquared(moving.center) <= moving.range * moving.range) {
         nearby.add(m.id);
       }
     }
     activity.advance(dt, nearby);
+    _lightingAccumulator += dt.isFinite ? dt.clamp(0, .1) : 0;
+    _updateLighting();
     _motionAccumulator += dt.isFinite ? dt.clamp(0, .1) : 0;
     if (_motionAccumulator < 1 / 30) return;
-    _motionAccumulator = 0;
+    _motionAccumulator %= 1 / 30;
     for (final moving in _moving) {
       final m = moving.part.motion!;
       if (!nearby.contains(m.id) ||
           !activity.motionEnabled(m.id) ||
-          eye.distanceToSquared(moving.center) >
-              m.rangeMeters * m.rangeMeters) {
+          eye.distanceToSquared(moving.center) > moving.range * moving.range) {
         continue;
       }
-      moving.part.mesh.setInstanceTransform(
-        moving.slot,
-        moving.entityTransform
-            .multiplied(activity.delta(m.id))
-            .multiplied(moving.part.transform),
-      );
+      activity.writeDelta(m.id, moving.delta);
+      moving.actual.setFrom(moving.entityTransform);
+      moving.actual.multiply(moving.delta);
+      moving.actual.multiply(moving.part.transform);
+      // flutter_scene invalidates aggregate and per-instance bounds here, so
+      // visibility follows the current pose rather than the original position.
+      moving.part.mesh.setInstanceTransform(moving.slot, moving.actual);
     }
+  }
+
+  void _updateLighting({bool force = false}) {
+    final lighting = _dayNight;
+    if (lighting == null || (!force && _lightingAccumulator < .2)) return;
+    _lightingAccumulator %= .2;
+    lighting.sample(activity.activeSeconds);
+    final sky = _cycleSky!;
+    sky.sunDirection.setFrom(lighting.sunDirection);
+    sky.sunColor.setFrom(lighting.sunColor);
+    sky.zenithColor.setFrom(lighting.zenithColor);
+    sky.horizonColor.setFrom(lighting.horizonColor);
+    sky.groundColor.setFrom(lighting.groundColor);
+    final sun = scene.directionalLight!;
+    sun.direction.setFrom(lighting.lightDirection);
+    sun.color.setFrom(lighting.lightColor);
+    sun.intensity = lighting.sunIntensity;
+    scene.environmentIntensity = lighting.environmentIntensity;
+    scene.exposure = lighting.exposure;
   }
 
   /// Checks the complete resident set before changing any GPU instances.
@@ -413,6 +462,7 @@ class VrlwSceneAdapter {
     scene.root.removeAll();
     _parts.clear();
     _moving.clear();
+    _nearbyMotions.clear();
   }
 }
 
@@ -425,11 +475,20 @@ class _Part {
 }
 
 class _MovingInstance {
-  _MovingInstance(this.part, this.slot, this.entityTransform, this.center);
+  _MovingInstance(
+    this.part,
+    this.slot,
+    this.entityTransform,
+    this.center,
+    this.range,
+  );
   final _Part part;
   final int slot;
   final vm.Matrix4 entityTransform;
   final vm.Vector3 center;
+  final double range;
+  final delta = vm.Matrix4.identity();
+  final actual = vm.Matrix4.identity();
 }
 
 typedef _MaterialKey = (

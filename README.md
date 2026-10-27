@@ -128,3 +128,149 @@ una medida de FPS o una comprobación acústica en dispositivo.
 ## Licencia
 
 Apache License 2.0 — consulta [LICENSE](LICENSE).
+
+## Local expeditions (v1 beta)
+
+Import `vrlizate_apps_expedition.dart` for the optional Flutter
+`VrlzExpeditionController`; the main barrel remains usable from pure Dart.
+Inject `VrlzExpeditionPersistence`, restore before presenting the world, and
+flush before releasing the identity/storage lease. A true action result changes
+memory; a successful `flush()` confirms durable storage.
+
+Definitions are bounded to **256 KiB**, 32 worlds, 128 main missions, 40 side
+stories and 80 conditional world changes. Progress remains **32 KiB**. Authoring
+also validates a conservative encoded progress bound, exposed as
+`estimatedSnapshotUpperBoundBytes`: it reserves all stamps, completed main/story
+records and optional pending/focus fields, even if mutually exclusive branches
+cannot all coexist. A definition whose identifiers could exceed the save budget
+is rejected before play; shorten those identifiers instead of enlarging saves.
+This is a JSON size bound, not a memory or GPU measurement.
+
+An authored mission may contain a `VrlzExpeditionGiver` and
+`VrlzExpeditionObject` together, plus an optional `rewardId`. Its flow is:
+
+1. Visit the named world and `accept(id, world, position)` near the giver.
+2. `interact(id, world, position)` near the object after acceptance.
+3. Return to the giver and `complete(id, world, position)`.
+
+The portable viewer renders one current pair using SDK avatar geometry and
+shared input. A opens a conversation with an explicit Accept/Deliver action;
+X opens the passport and B closes it before exiting. Object kinds are bounded
+strings `collect`, `examine`, `activate`. Giver position is at the feet; object
+position is its centre. Radii are checked against the viewer's eye position.
+The renderer checks visibility on interaction, including instanced geometry.
+
+While the passport is open, the left stick/D-pad or arrow keys changes pages
+horizontally and focuses visible controls vertically. Each deliberate gesture
+requires returning to neutral before another step. A (Enter/Space on a keyboard)
+activates the focused control; without explicit focus it keeps spatial ray
+selection. Moving the laser clears focus, while repeating a retained phone aim
+does not. X/B close the panel. Instructions are displayed in the spatial footer.
+
+Passport movement/look gates pause stick locomotion and rotation while leaving
+head tracking and pointing available. Closing on a held axis requires neutral
+before that axis can move the world again; closing on centered axes does not
+swallow the next gesture. Focus clears on page replacement or lifecycle changes,
+and rebuilding pages cannot invoke stale actions. Available stories appear before
+saved history pages. Story actions are limited to two per page; additional
+unlocked continuations receive their own pages. The
+phone transport and SDK A/X/B protocol remain unchanged.
+
+Schema-1 snapshots optionally include `pendingMission: {missionId, stage}` with
+`accepted` or `collected`. Old completed missions stay completed; missions
+without giver/object keep their previous proximity flow. `rewardIds` is derived
+from completed mission IDs, not a separately writable inventory. Hosts resolve
+known cosmetic IDs and enforce account/profile scope; local progress is not a
+server-verified entitlement. The scene owns neither accounts nor storage.
+
+CPU tests cover sequencing, restore, errors and selection policies; they do not
+establish mobile GPU performance. NPC and UI geometry is additional to the
+world's streaming budget. Text is rebuilt on state changes, not every frame.
+
+### Optional stories and alternate routes
+
+A definition can add up to 40 `VrlzExpeditionSideQuest` entries without changing
+main mission IDs. Each unlocks after a completed `afterMissionId`, has a giver
+in its origin `world`, and offers exactly two `VrlzExpeditionChoice` entries.
+Each choice provides dialogue, a label, a discovery, one to three known distinct
+route worlds, and an object in the final world. The origin cannot appear in the
+route: it is the return/delivery destination.
+
+`focusSideQuest(id)` selects a story; `focusSideQuest(null)` returns to the main
+objective without erasing either pending task. Near the giver,
+`chooseSideQuest(id, choiceId, world, eye)` commits the decision. Subsequent
+`visit(world)` calls record ordered route checkpoints even for previously stamped
+worlds. `interactSideQuest` requires every checkpoint and proximity to the final
+object; `completeSideQuest` requires returning to the origin giver. A choice
+cannot be replaced after acceptance. There may be one pending side story and
+one pending main assignment; completed side stories remain readable.
+
+Schema-1 saves optionally add `focusedSideQuestId` and a `sideQuests` map of
+`{choiceId, visitedStops, collected, completedAt?}`. Existing passports remain
+valid. Restore rejects unknown choices, invalid prefixes, missing prerequisites,
+multiple pending stories and inconsistent dates without replacing the save.
+The viewer derives NPC/object visibility and one contextual route gate from this
+state. It revalidates the destination and active lifecycle after waiting for
+storage, and uses the existing save barrier and world loader. Worlds, geometry,
+input and persistence services are reused rather than duplicated per branch.
+
+### Connected stories and conditional dialogue
+
+`VrlzExpeditionSideQuest.requires` optionally adds up to eight
+`VrlzExpeditionStoryRequirement(questId, choiceIds)` entries. All requirements
+must match; each accepts one or both choices of a **delivered** story. Selecting
+a choice or collecting its object does not satisfy a requirement. The main
+`afterMissionId` prerequisite still applies.
+
+`dialogueVariants` optionally contains up to sixteen
+`VrlzExpeditionDialogueVariant(requires, dialogue)` entries, each with one to
+eight requirements. The first matching variant wins; otherwise the giver's
+original dialogue is used. Put more specific variants first. Dialogue rules
+only read delivered history and do not grant progress themselves.
+
+`controller.isSideQuestUnlocked(quest)` and `sideQuestDialogue(quest)` derive
+their answers from the existing passport. Focus, choice acceptance and restore
+use the same unlock rules. Definitions reject unknown references/choices,
+duplicate requirements, cyclic unlock dependencies and contradictory choices
+among a chapter's ancestors. Restoring a continuation
+requires its delivered antecedents and consistent completion dates, independent
+of JSON map order. There are no additional snapshot fields or mutable unlock
+flags, and an older save can unlock newly added stories on its next read.
+
+The viewer uses resolved dialogue and lists only available stories as actionable.
+Its progress summary counts completed and available stories, without treating
+mutually exclusive branches as missing completion. Completed entries show the
+continuations connected to that history that are currently available. Only the
+tracked NPC/object and route gate are prepared; this adds no render loop or
+world/texture copies. Preserve published choice IDs and meaning when adding
+content; changes to existing prerequisites require an explicit save migration.
+
+### Visible world consequences
+
+An expedition can supply up to 80 optional `worldChanges` entries. Each
+`VrlzExpeditionWorldChange` has a unique `id`, a known `world`, one to eight
+delivered-story `requires`, and at least one component:
+
+- `VrlzExpeditionWorldProp`: `kind`, `label`, `description`, feet `position` and
+  inspection `radius`. Kinds are `planter`, `archive`, `beacon` and `shelter`.
+- `VrlzExpeditionWorldAccess`: `label`, known `destination`, centre `position`
+  and interaction `radius`. Destination must differ from the origin world.
+- `reaction`: an existing `VrlzExpeditionGiver` record, including the original
+  character ID so the viewer can avoid displaying the same NPC twice.
+
+`controller.worldChange(world)` returns the first compatible entry for that
+world, or null. Put later chapters before earlier consequences to replace them.
+This limits the active consequence to one prop, one shortcut and one reaction
+per world. The same strict reference/condition validation applies; no scripts,
+asset URLs or additional mutable progress flags are accepted.
+
+The viewer applies changes to the loaded scene using shared geometry, the
+existing avatar renderer and spatial UI. Inspection is read-only; shortcuts use
+the world loader and save barrier with proximity, visibility and fresh-state
+checks. Existing portals and quest objectives remain available. Consequences
+are reconstructed on return or restart from the same identity-scoped passport,
+including saves created before `worldChanges` existed. The container format,
+world binaries and snapshot schema do not change.
+
+These are local narrative consequences. They do not imply shared multiplayer
+world edits, a cloud inventory, physical collision or measured mobile FPS.

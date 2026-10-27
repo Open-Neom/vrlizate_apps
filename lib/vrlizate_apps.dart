@@ -21,6 +21,8 @@ export 'src/bundles/vrlw_audio_policy.dart';
 export 'src/bundles/vrlz_world_manifest.dart';
 export 'src/bundles/vrlz_world_bundle.dart';
 export 'src/bundles/vrlz_world_session.dart';
+export 'src/expedition/vrlz_expedition_definition.dart';
+export 'src/expedition/vrlz_expedition_persistence.dart';
 export 'utils/constants/vr_apps_constants.dart';
 export 'utils/enums/vr_mini_app_category.dart';
 

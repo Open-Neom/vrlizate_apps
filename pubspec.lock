@@ -394,7 +394,7 @@ packages:
     source: path
     version: "1.13.0"
   vrlizate_avatar:
-    dependency: "direct overridden"
+    dependency: "direct main"
     description:
       path: "../vrlizate_avatar"
       relative: true
