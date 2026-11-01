@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../bundles/vrlw_http_source.dart' show isPrivateLanOrLoopbackHost;
 import '../bundles/vrz_glb.dart' show decodeVrzJson;
 
 /// An explicit web index, not an HTTP directory listing or executable manifest.
@@ -12,8 +13,12 @@ final class VrlzWebCatalog {
   final Uri source;
   final List<VrlzWebCatalogEntry> entries;
 
-  static VrlzWebCatalog decode(Uint8List bytes, {required Uri source}) {
-    _validateHttps(source);
+  static VrlzWebCatalog decode(
+    Uint8List bytes, {
+    required Uri source,
+    bool allowPrivateLanHttp = false,
+  }) {
+    _validateCatalogUri(source, allowPrivateLanHttp: allowPrivateLanHttp);
     if (bytes.length > maxBytes) {
       throw const FormatException('VRLZ web catalog exceeds 256 KiB.');
     }
@@ -61,7 +66,7 @@ final class VrlzWebCatalog {
         throw const FormatException('Invalid VRLZ web catalog entry.');
       }
       final url = source.resolve(address).normalizePath();
-      _validateHttps(url);
+      _validateCatalogUri(url, allowPrivateLanHttp: allowPrivateLanHttp);
       // origin canonicalizes the default HTTPS port; normalizePath removes
       // dot segments before detecting aliases of the same requested URL.
       final urlKey =
@@ -85,8 +90,13 @@ final class VrlzWebCatalogEntry {
   final String sha256;
 }
 
-void _validateHttps(Uri uri) {
-  if (uri.scheme != 'https' ||
+void _validateCatalogUri(Uri uri, {required bool allowPrivateLanHttp}) {
+  final validLanHttp =
+      allowPrivateLanHttp &&
+      uri.scheme == 'http' &&
+      isPrivateLanOrLoopbackHost(uri.host) &&
+      uri.pathSegments.where((s) => s.isNotEmpty).isNotEmpty;
+  if ((uri.scheme != 'https' && !validLanHttp) ||
       uri.host.isEmpty ||
       uri.userInfo.isNotEmpty ||
       uri.hasFragment ||

@@ -4,7 +4,33 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:vrlizate_world/vrlizate_world.dart';
 
-/// Strict HTTPS byte ranges over one immutable .vrlw representation.
+/// Returns true only for loopback (`127.0.0.1`, `::1`, `localhost`) or RFC1918
+/// private LAN IPv4 addresses (`10/8`, `172.16/12`, `192.168/16`).
+bool isPrivateLanOrLoopbackHost(String host) {
+  final clean = host.trim().toLowerCase();
+  if (clean == '127.0.0.1' || clean == '::1' || clean == 'localhost') {
+    return true;
+  }
+  final parts = clean.split('.');
+  if (parts.length != 4) return false;
+  final octets = <int>[];
+  for (final part in parts) {
+    if (part.isEmpty || (part.length > 1 && part.startsWith('0'))) {
+      return false;
+    }
+    final value = int.tryParse(part);
+    if (value == null || value < 0 || value > 255) return false;
+    octets.add(value);
+  }
+  final a = octets[0];
+  final b = octets[1];
+  return a == 10 ||
+      (a == 172 && b >= 16 && b <= 31) ||
+      (a == 192 && b == 168);
+}
+
+/// Strict HTTPS (or opt-in authenticated private-LAN HTTP) byte ranges over one
+/// immutable .vrlw representation.
 ///
 /// Servers must support Range, identity content encoding, and a strong ETag.
 /// Redirects and full-body fallback are rejected. Browser hosts additionally
@@ -16,8 +42,14 @@ final class VrlwHttpSource implements VrlwByteSource {
     http.Client? client,
     Duration timeout = const Duration(seconds: 15),
     String? expectedETag,
+    bool allowPrivateLanHttp = false,
   }) {
-    if (uri.scheme != 'https' ||
+    final validLanHttp =
+        allowPrivateLanHttp &&
+        uri.scheme == 'http' &&
+        isPrivateLanOrLoopbackHost(uri.host) &&
+        uri.pathSegments.where((s) => s.isNotEmpty).isNotEmpty;
+    if ((uri.scheme != 'https' && !validLanHttp) ||
         uri.host.isEmpty ||
         uri.userInfo.isNotEmpty ||
         uri.hasFragment ||

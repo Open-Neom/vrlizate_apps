@@ -20,6 +20,7 @@ import 'vrlz_expedition_occlusion.dart';
 import 'vrlz_expedition_task.dart';
 import 'vrlz_world_change_policy.dart';
 import 'vrlz_world_change_overlay.dart';
+import 'vrlz_world_keyboard.dart';
 
 /// SDK-owned interpreter for validated local-world data, never downloaded code.
 /// A host supplies durable storage and may provide controller events through
@@ -33,6 +34,10 @@ class VrlzWorldViewer extends StatelessWidget {
     this.onExit,
     this.audioOutputFactory,
     this.expedition,
+    this.distanceLod = true,
+    this.dynamicScaling = true,
+    this.quality,
+    this.onQualityChanged,
   });
 
   final VrlzWorldBundle bundle;
@@ -49,6 +54,14 @@ class VrlzWorldViewer extends StatelessWidget {
   /// The viewer never reads campaign storage or creates another controller.
   final VrlzExpeditionController? expedition;
 
+  /// Use authored distance levels. False retains level zero for every resident
+  /// entity, useful for comparing appearance and cost with identical assets.
+  /// Changing this retains the current pose, world activity and progress.
+  final bool distanceLod;
+  final bool dynamicScaling;
+  final VrQualityPreset? quality;
+  final void Function(VrQualityPreset)? onQualityChanged;
+
   @override
   Widget build(BuildContext context) => VrGpuResourceGate(
     onBack: onExit,
@@ -60,6 +73,10 @@ class VrlzWorldViewer extends StatelessWidget {
       onExit: onExit,
       audioOutputFactory: audioOutputFactory,
       expedition: expedition,
+      distanceLod: distanceLod,
+      dynamicScaling: dynamicScaling,
+      quality: quality,
+      onQualityChanged: onQualityChanged,
     ),
   );
 }
@@ -73,6 +90,10 @@ class _WorldPlayer extends StatefulWidget {
     this.onExit,
     this.audioOutputFactory,
     this.expedition,
+    required this.distanceLod,
+    required this.dynamicScaling,
+    this.quality,
+    this.onQualityChanged,
   });
   final VrlzWorldBundle bundle;
   final VrlzWorldPersistence saveStore;
@@ -80,6 +101,10 @@ class _WorldPlayer extends StatefulWidget {
   final VoidCallback? onExit;
   final VrlwAudioOutput Function()? audioOutputFactory;
   final VrlzExpeditionController? expedition;
+  final bool distanceLod;
+  final bool dynamicScaling;
+  final VrQualityPreset? quality;
+  final void Function(VrQualityPreset)? onQualityChanged;
   @override
   State<_WorldPlayer> createState() => _WorldPlayerState();
 }
@@ -358,6 +383,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
         prepared.reader,
         prepared.resources,
         isCurrent: current,
+        debugForceHighestLod: !widget.distanceLod,
         activity: _activities.putIfAbsent(
           prepared.reader.index.id,
           () => VrlwWorldActivity(prepared!.reader.index),
@@ -1253,30 +1279,36 @@ class _WorldPlayerState extends State<_WorldPlayer>
     }
     final changed = _canSelectWorldChange(node.name);
     if (changed != null) return changed;
-    final task = _task;
-    if (task?.giver != null &&
-        node.name == VrlzExpeditionActor.giverName(task!.actorId!)) {
-      return task.canTalk(_session.currentWorld, _rig.eyeCenter.storage);
+    // Most candidates are portals or world actions. Resolve campaign state
+    // only for names that can use it, without caching mutable progress.
+    if (node.name.startsWith('vrlz_expedition_giver_') ||
+        node.name.startsWith('vrlz_expedition_object_')) {
+      final task = _task;
+      if (task?.giver != null &&
+          node.name == VrlzExpeditionActor.giverName(task!.actorId!)) {
+        return task.canTalk(_session.currentWorld, _rig.eyeCenter.storage);
+      }
+      if (task?.object != null &&
+          node.name == VrlzExpeditionActor.objectName(task!.actorId!)) {
+        return task.canInteract(_session.currentWorld, _rig.eyeCenter.storage);
+      }
     }
-    if (task?.object != null &&
-        node.name == VrlzExpeditionActor.objectName(task!.actorId!)) {
-      return task.canInteract(_session.currentWorld, _rig.eyeCenter.storage);
-    }
-    final route = widget.expedition == null
-        ? null
-        : VrlzExpeditionRoute.current(
+    if (node.name.startsWith('vrlz_side_route_')) {
+      final route = widget.expedition == null
+          ? null
+          : VrlzExpeditionRoute.current(
+              widget.expedition!,
+              _session.currentWorld,
+            );
+      return route != null &&
+          node.name == route.name &&
+          route.canTravel(
             widget.expedition!,
             _session.currentWorld,
+            _rig.eyeCenter.storage,
+            node.name,
           );
-    if (route != null && node.name == route.name) {
-      return route.canTravel(
-        widget.expedition!,
-        _session.currentWorld,
-        _rig.eyeCenter.storage,
-        node.name,
-      );
     }
-    if (node.name.startsWith('vrlz_side_route_')) return false;
     if (node.name == VrlzExpeditionSceneUi.openName) {
       return _totemPosition != null &&
           _totemPosition!.distanceToSquared(_rig.eyeCenter) <= 3.5 * 3.5;
@@ -1459,22 +1491,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
       final keys = _arbiter == null && !_passportOpen
           ? HardwareKeyboard.instance.logicalKeysPressed
           : const <LogicalKeyboardKey>{};
-      final step = dt.clamp(0.0, .05);
-      final forward = _rig.forward..y = 0;
-      if (forward.length2 > .001) forward.normalize();
-      final right = _rig.screenRight..y = 0;
-      if (right.length2 > .001) right.normalize();
-      var x = 0.0, z = 0.0;
-      if (keys.contains(LogicalKeyboardKey.keyW)) z++;
-      if (keys.contains(LogicalKeyboardKey.keyS)) z--;
-      if (keys.contains(LogicalKeyboardKey.keyD)) x++;
-      if (keys.contains(LogicalKeyboardKey.keyA)) x--;
-      final norm = math.max(1.0, math.sqrt(x * x + z * z));
-      _rig.eyeCenter.add((forward * z + right * x) * (2.5 * step / norm));
-      if (keys.contains(LogicalKeyboardKey.arrowLeft)) _rig.bodyYaw += step;
-      if (keys.contains(LogicalKeyboardKey.arrowRight)) _rig.bodyYaw -= step;
-      if (keys.contains(LogicalKeyboardKey.arrowUp)) _rig.bodyPitch -= step;
-      if (keys.contains(LogicalKeyboardKey.arrowDown)) _rig.bodyPitch += step;
+      applyVrlzKeyboardMotion(_rig, keys, dt);
       // Stay inside authored cells so a saved pose always has a valid region.
       final index = _prepared!.reader.index;
       final eye = _rig.eyeCenter;
@@ -1496,6 +1513,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
           _arrivalForward!.dot(_rig.forward) < .994521895) {
         _portalsArmed = true;
       }
+      _adapter?.setDistanceLod(widget.distanceLod);
       _adapter?.update(_rig.eyeCenter, dt);
       _questActor?.tick(dt, _rig.eyeCenter);
       _worldChangeOverlay?.tick(dt, _rig.eyeCenter);
@@ -1626,6 +1644,9 @@ class _WorldPlayerState extends State<_WorldPlayer>
                   scene: _adapter!.scene,
                   rig: _rig,
                   look: const VrLook(bloomIntensity: 0),
+                  quality: widget.quality,
+                  dynamicScaling: widget.dynamicScaling,
+                  onQualityChanged: widget.onQualityChanged,
                   enableHandTracking: false,
                   onTick: _tick,
                   gazeFilter: _canSelect,

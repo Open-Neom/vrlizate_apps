@@ -7,6 +7,12 @@ import 'package:vector_math/vector_math.dart' as vm;
 import 'package:vrlizate_world/vrlizate_world.dart';
 
 import '../bundles/vrz_glb.dart';
+import '../bundles/vrlw_texture_policy.dart';
+import 'vrlw_resident_changes.dart';
+import 'vrlw_lod_selector.dart';
+import 'vrlw_motion_runtime.dart';
+import 'vrlw_static_part_pool.dart';
+import 'vrlw_skybox.dart';
 import 'vrlw_world_activity.dart';
 import 'vrlw_day_night.dart';
 
@@ -14,7 +20,11 @@ import 'vrlw_day_night.dart';
 /// with the Apps profile before passing resources here, and owns the reader.
 /// Geometry/materials are uploaded once, then reused by regional instances.
 class VrlwSceneAdapter {
-  VrlwSceneAdapter._(this.reader, this.activity) {
+  VrlwSceneAdapter._(
+    this.reader,
+    this.activity, {
+    bool debugForceHighestLod = false,
+  }) : _forceHighestLod = debugForceHighestLod {
     final provider = VrlwRegionProvider(reader);
     cache = VrRegionCache(
       grid: provider.grid,
@@ -26,26 +36,43 @@ class VrlwSceneAdapter {
       maxConcurrentLoads: 2,
       idleTtl: const Duration(minutes: 2),
     );
-    _subscription = cache.changes.listen((_) => _dirty = true);
+    _subscription = cache.changes.listen((snapshot) {
+      if (_residentChanges.update(snapshot)) _dirty = true;
+    });
   }
 
   final VrlwPlaceReader reader;
   final VrlwWorldActivity activity;
+
+  /// Diagnostic override for comparing full-detail and authored LOD.
+  /// This does not change the world format, admission budgets or motion rates.
+  bool get debugForceHighestLod => _forceHighestLod;
+  bool _forceHighestLod;
+
+  /// Change only geometry selection, retaining pose, progress, imported
+  /// resources and motion phases. Rebuild the affected residency next update.
+  void setDistanceLod(bool enabled) {
+    if (_disposed || _forceHighestLod == !enabled) return;
+    _forceHighestLod = !enabled;
+    _dirty = true;
+  }
+
   final scene = VrlwGuardedScene();
   late final VrRegionCache<List<VrWorldEntity>> cache;
   late final StreamSubscription<VrRegionSnapshot<List<VrWorldEntity>>>
   _subscription;
-  final _parts = <String, List<_Part>>{};
+  final _residentChanges = VrlwResidentChanges<List<VrWorldEntity>>();
+  final _parts = <String, List<List<_Part>>>{};
+  final _lod = VrlwLodSelector();
   final prototypeColliders = <String, VrlwColliderSpec>{};
   late final List<VrlwAudioEmitter> audioEmitters = reader.index.audioEmitters;
   bool _dirty = true, _disposed = false;
   double _maintenance = 0;
-  double _motionAccumulator = 0;
   double _lightingAccumulator = 0;
   VrlwDayNightLighting? _dayNight;
   fs.GradientSkySource? _cycleSky;
-  final _nearbyMotions = <String>{};
-  final _moving = <_MovingInstance>[];
+  late final _motionRuntime = VrlwMotionRuntime(activity);
+  List<VrWorldEntity> _residentEntities = const [];
   static const maxMovingPrimitiveInstances = 16;
   static const maxVisibleEntities = 128;
   static const maxPrimitiveInstances = 256;
@@ -59,16 +86,24 @@ class VrlwSceneAdapter {
     Map<String, Uint8List> resources, {
     required bool Function() isCurrent,
     VrlwWorldActivity? activity,
+    bool debugForceHighestLod = false,
   }) async {
+    // Also protect direct adapter callers before creating any scene resources.
+    for (final resource in reader.index.resources) {
+      VrlwTexturePolicy.validateDecoder(resource.type);
+    }
     final adapter = VrlwSceneAdapter._(
       reader,
       activity ?? VrlwWorldActivity(reader.index),
+      debugForceHighestLod: debugForceHighestLod,
     );
     try {
       final models = <String, fs.Node>{};
       final textures = <String, fs.Texture2D>{};
       final materials = VrlwMaterialCache();
+      // Retain only counts, never copied vertex data, between imported parts.
       final triangleCounts = Map<fs.Geometry, int>.identity();
+      final geometryFingerprints = Map<fs.Geometry, String>.identity();
       var primitiveCount = 0;
       const sampling = fs.TextureSampling(maxAnisotropy: 4);
 
@@ -140,8 +175,36 @@ class VrlwSceneAdapter {
         final shadowMode = (binding.castsShadows ?? false)
             ? fs.ShadowCastingMode.on
             : fs.ShadowCastingMode.off;
-        final parts = <_Part>[];
-        void visit(fs.Node node, vm.Matrix4 parentTransform) {
+        final hasLod = binding.lods.isNotEmpty;
+        if (hasLod &&
+            reader.index.motions.any(
+              (motion) => motion.prototypeId == binding.prototypeId,
+            )) {
+          throw const FormatException(
+            'Portable LOD prototypes must be static.',
+          );
+        }
+        final parts = List.generate(
+          hasLod ? binding.lods.length : 1,
+          (_) => <_Part>[],
+        );
+        final levelRoots = <String, int>{
+          for (var i = 0; i < binding.lods.length; i++) binding.lods[i].node: i,
+        };
+        final seenRoots = <int>{};
+        final detailedBounds = _LodBoundsAccumulator();
+        // Scoped to this prototype: independent LOD rebuilds must never clear
+        // instances belonging to a different prototype's batch. The pool keeps
+        // hashes and part references only, never extracted geometry snapshots.
+        final sharedStaticParts = VrlwStaticPartPool<_Part>();
+        void visit(fs.Node node, vm.Matrix4 parentTransform, int? level) {
+          final declaredLevel = levelRoots[node.name];
+          if (declaredLevel != null) {
+            if (level != null || !seenRoots.add(declaredLevel)) {
+              throw const FormatException('Ambiguous or nested LOD root.');
+            }
+            level = declaredLevel;
+          }
           final transform = parentTransform.multiplied(node.localTransform);
           for (final primitive
               in node.mesh?.primitives ?? <fs.MeshPrimitive>[]) {
@@ -150,13 +213,51 @@ class VrlwSceneAdapter {
                 'Portable world exceeds geometry group budget.',
               );
             }
-            // Inspect the public CPU snapshot once for each shared geometry.
-            // Counting primitive groups alone would let a small number of
-            // high-detail models multiply into millions of submitted triangles.
-            final triangles = triangleCounts.putIfAbsent(
-              primitive.geometry,
-              () => primitive.geometry.extractMeshData().triangleCount,
-            );
+            // Count every resident instance against its actual geometry.
+            // Bounds snapshots are transient and scoped to this part import;
+            // transformed LOD0 reuse may rescan a shared mesh at import time.
+            if (level == null) {
+              throw const FormatException(
+                'Geometry outside the declared LOD roots.',
+              );
+            }
+            var triangles = triangleCounts[primitive.geometry];
+            final needsBounds = hasLod && level == 0;
+            var fingerprint = geometryFingerprints[primitive.geometry];
+            if (triangles == null ||
+                needsBounds ||
+                (hasLod && fingerprint == null)) {
+              final snapshot = primitive.geometry.extractMeshData();
+              triangles ??= snapshot.triangleCount;
+              triangleCounts[primitive.geometry] = triangles;
+              if (needsBounds) {
+                detailedBounds.include(snapshot.positions, transform);
+              }
+              if (hasLod && fingerprint == null) {
+                fingerprint = vrlwGeometryFingerprint(
+                  vertexCount: snapshot.vertexCount,
+                  primitiveType: snapshot.primitiveType.index,
+                  // Required to preserve the engine's importer handedness.
+                  // ignore: invalid_use_of_internal_member
+                  sourceWindingFlipped: primitive.geometry.sourceWindingFlipped,
+                  positions: snapshot.positions,
+                  normals: snapshot.normals,
+                  texCoords: snapshot.texCoords,
+                  texCoords1: snapshot.texCoords1,
+                  colors: snapshot.colors,
+                  tangents: snapshot.tangents,
+                  indices: snapshot.indices,
+                  customAttributes: {
+                    for (final entry in snapshot.customAttributes.entries)
+                      entry.key: (
+                        components: entry.value.components,
+                        data: entry.value.data,
+                      ),
+                  },
+                );
+                geometryFingerprints[primitive.geometry] = fingerprint;
+              }
+            }
             if (triangles <= 0) {
               throw const FormatException(
                 'Portable world requires nonempty triangle geometry.',
@@ -170,52 +271,79 @@ class VrlwSceneAdapter {
               emissive: emissive,
               occlusion: occlusion,
             );
-            final mesh = fs.InstancedMesh(
-              geometry: primitive.geometry,
-              material: material,
-              cullInstances: true,
-            );
-            adapter.scene.add(
-              fs.Node()
-                ..raycastable = false
-                ..shadowCastingMode = shadowMode
-                ..addComponent(fs.InstancedMeshComponent(mesh)),
-            );
             final matches = reader.index.motions.where(
               (m) =>
                   m.prototypeId == binding.prototypeId && m.node == node.name,
             );
-            parts.add(
-              _Part(
-                mesh,
-                transform,
-                triangles,
-                matches.isEmpty ? null : matches.single,
-              ),
+            final motion = matches.isEmpty ? null : matches.single;
+            _Part createPart() {
+              final mesh = fs.InstancedMesh(
+                geometry: primitive.geometry,
+                material: material,
+                cullInstances: true,
+              );
+              final renderNode = fs.Node()
+                ..raycastable = false
+                ..visible = false
+                ..shadowCastingMode = shadowMode
+                ..addComponent(fs.InstancedMeshComponent(mesh));
+              adapter.scene.add(renderNode);
+              return _Part(mesh, renderNode, transform, triangles!, motion);
+            }
+
+            parts[level].add(
+              hasLod && motion == null
+                  ? sharedStaticParts.resolve(
+                      level: level,
+                      geometryFingerprint: fingerprint!,
+                      transform: transform.storage,
+                      material: material,
+                      shadowMode: shadowMode,
+                      create: createPart,
+                    )
+                  : createPart(),
             );
           }
           for (final child in node.children) {
-            visit(child, transform);
+            visit(child, transform, level);
           }
         }
 
         // Runtime GLB import mirrors Z at its boundary. Cancel that mirror so
         // authored mesh coordinates agree with VRLW's +Y up / -Z forward.
-        visit(model, vm.Matrix4.diagonal3Values(1, 1, -1));
-        if (parts.isEmpty) {
+        visit(model, vm.Matrix4.diagonal3Values(1, 1, -1), hasLod ? null : 0);
+        if (parts.any((level) => level.isEmpty) ||
+            (hasLod && seenRoots.length != binding.lods.length)) {
           throw const FormatException(
             'Prototype contains no renderable geometry.',
           );
         }
         adapter._parts[binding.prototypeId] = parts;
+        if (hasLod) {
+          adapter._lod.register(
+            binding.prototypeId,
+            VrlwLodPolicy(
+              minDistancesMeters: binding.lods.map(
+                (level) => level.minDistanceMeters,
+              ),
+              hysteresisMeters: binding.lodHysteresisMeters,
+              bounds: detailedBounds.finish(),
+            ),
+          );
+        }
       }
+      triangleCounts.clear();
       final env = reader.index.environment;
+      final environments = <String, Future<fs.EnvironmentMap>>{};
+      Future<fs.EnvironmentMap> loadEnvironment(String id) =>
+          environments.putIfAbsent(
+            id,
+            () => fs.EnvironmentMap.fromKtx2Bytes(resources[id]!),
+          );
       fs.EnvironmentMap environmentMap = fs.EnvironmentMap.empty();
       var environmentIntensity = 0.0;
       if (env?.environmentResource != null) {
-        environmentMap = await fs.EnvironmentMap.fromKtx2Bytes(
-          resources[env!.environmentResource!]!,
-        );
+        environmentMap = await loadEnvironment(env!.environmentResource!);
         environmentIntensity = env.environmentIntensity ?? 1.0;
       } else if (env?.environmentIntensity != null) {
         environmentIntensity = env!.environmentIntensity!;
@@ -226,12 +354,21 @@ class VrlwSceneAdapter {
       final sunColor = env?.sunColor != null
           ? vm.Vector3.array(env!.sunColor!)
           : vm.Vector3(1, .96, .9);
+      final authoredSky = await loadVrlwAuthoredSky<fs.Skybox>(
+        env,
+        resourceType: (id) => reader.index.resourceAt(id)!.type,
+        fromEnvironment: (id) async =>
+            vrlwEnvironmentSkybox(await loadEnvironment(id)),
+        fromTexture: (id) async => vrlwTextureSkybox(
+          (await loadTexture(id, fs.TextureContent.color))!,
+          fs.EnvironmentMap.empty(),
+        ),
+      );
+      if (!isCurrent()) throw StateError('World opening cancelled.');
       adapter.scene
         ..environment = environmentMap
         ..environmentIntensity = environmentIntensity
-        ..skybox = env?.skyboxResource != null
-            ? fs.Skybox(fs.EnvironmentSkySource())
-            : null
+        ..skybox = authoredSky
         ..exposure = env?.exposure ?? 1.0
         ..directionalLight = fs.DirectionalLight(
           direction: sunDir,
@@ -254,8 +391,10 @@ class VrlwSceneAdapter {
           baseEnvironmentIntensity: env?.environmentIntensity ?? 1,
           baseExposure: env?.exposure ?? 1,
         );
-        adapter._cycleSky = fs.GradientSkySource();
-        adapter.scene.skybox = fs.Skybox(adapter._cycleSky!);
+        if (authoredSky == null) {
+          adapter._cycleSky = fs.GradientSkySource();
+          adapter.scene.skybox = fs.Skybox(adapter._cycleSky!);
+        }
         adapter._updateLighting(force: true);
       }
       return adapter;
@@ -267,37 +406,57 @@ class VrlwSceneAdapter {
 
   void update(vm.Vector3 eye, double dt) {
     if (_disposed) return;
-    cache.updatePosition(VrWorldPosition(eye.x, eye.y, eye.z));
+    final position = VrWorldPosition(eye.x, eye.y, eye.z);
+    cache.updatePosition(position);
     _maintenance += dt.isFinite ? dt.clamp(0, 1) : 0;
     if (_maintenance >= 5) {
       _maintenance = 0;
       cache.prune();
     }
-    if (!_dirty) {
+    if (_dirty) {
+      final snapshot = cache.snapshot;
+      if (snapshot.errors.isNotEmpty) throw snapshot.errors.values.first;
+      final entities = [
+        for (final region in snapshot.resident.values) ...region.value,
+      ];
+      // Always admit the full near-detail cost. Approaching an object cannot
+      // invalidate a world that happened to be cheap at its entry point.
+      validateActiveGeometry(entities, {
+        for (final entry in _parts.entries)
+          entry.key: [for (final part in entry.value.first) part.triangles],
+      });
+      validateActiveMotion(entities, {
+        for (final entry in _parts.entries)
+          entry.key: entry.value.first.where((p) => p.motion != null).length,
+      });
+      _residentEntities = entities;
+      _lod.replaceEntities(entities);
+    }
+    final lodChanged =
+        !debugForceHighestLod && _lod.update(position, dt, force: _dirty);
+    if (!_dirty && !lodChanged) {
       _updateMotion(eye, dt);
       return;
     }
+    final regionsChanged = _dirty;
+    final changedPrototypes = _lod.changedPrototypeIds;
     _dirty = false;
-    final snapshot = cache.snapshot;
-    if (snapshot.errors.isNotEmpty) throw snapshot.errors.values.first;
-    final entities = [
-      for (final region in snapshot.resident.values) ...region.value,
-    ];
-    validateActiveGeometry(entities, {
-      for (final entry in _parts.entries)
-        entry.key: [for (final part in entry.value) part.triangles],
-    });
-    validateActiveMotion(entities, {
-      for (final entry in _parts.entries)
-        entry.key: entry.value.where((p) => p.motion != null).length,
-    });
-    _moving.clear();
-    for (final parts in _parts.values) {
-      for (final part in parts) {
-        part.mesh.clearInstances();
+    // LOD is restricted to static prototypes: moving slots remain valid when
+    // only a static band's membership changes. Region changes still rebuild all.
+    if (regionsChanged) _motionRuntime.clear();
+    for (final entry in _parts.entries) {
+      if (!regionsChanged && !changedPrototypes.contains(entry.key)) continue;
+      final levels = entry.value;
+      for (final parts in levels) {
+        for (final part in parts) {
+          part.mesh.clearInstances();
+        }
       }
     }
-    for (final entity in entities) {
+    for (final entity in _residentEntities) {
+      if (!regionsChanged && !changedPrototypes.contains(entity.prototypeId)) {
+        continue;
+      }
       final pose = entity.transform;
       final transform =
           vm.Matrix4.translationValues(
@@ -307,7 +466,8 @@ class VrlwSceneAdapter {
             )
             ..rotateY(pose.yawRadians)
             ..scaleByDouble(pose.scale, pose.scale, pose.scale, 1);
-      for (final part in _parts[entity.prototypeId]!) {
+      final level = debugForceHighestLod ? 0 : _lod.levelFor(entity.id);
+      for (final part in _parts[entity.prototypeId]![level]) {
         final motion = part.motion;
         final actual = motion == null
             ? transform.multiplied(part.transform)
@@ -318,17 +478,28 @@ class VrlwSceneAdapter {
         if (motion != null) {
           final path = activity.pathFor(motion.id);
           final center = path?.boundsCenter ?? vm.Vector3.array(motion.pivot);
-          _moving.add(
-            _MovingInstance(
-              part,
-              slot,
-              transform,
-              transform.transformed3(center),
-              motion.rangeMeters +
-                  (path?.boundsRadius ?? motion.amplitude?.abs() ?? 0) *
-                      pose.scale.abs(),
-            ),
+          _motionRuntime.add(
+            batch: part.motionBatch!,
+            motionId: motion.id,
+            slot: slot,
+            entityTransform: transform,
+            localTransform: part.transform,
+            center: transform.transformed3(center),
+            range:
+                motion.rangeMeters +
+                (path?.boundsRadius ?? motion.amplitude?.abs() ?? 0) *
+                    pose.scale.abs(),
           );
+        }
+      }
+    }
+    // Empty LOD batches retain reusable resources but skip mesh refresh and
+    // render passes until selected again. Scene still visits the hidden nodes.
+    for (final entry in _parts.entries) {
+      if (!regionsChanged && !changedPrototypes.contains(entry.key)) continue;
+      for (final parts in entry.value) {
+        for (final part in parts) {
+          part.node.visible = part.mesh.instanceCount > 0;
         }
       }
     }
@@ -336,34 +507,9 @@ class VrlwSceneAdapter {
   }
 
   void _updateMotion(vm.Vector3 eye, double dt) {
-    final nearby = _nearbyMotions..clear();
-    for (final moving in _moving) {
-      final m = moving.part.motion!;
-      if (eye.distanceToSquared(moving.center) <= moving.range * moving.range) {
-        nearby.add(m.id);
-      }
-    }
-    activity.advance(dt, nearby);
+    _motionRuntime.update(eye, dt);
     _lightingAccumulator += dt.isFinite ? dt.clamp(0, .1) : 0;
     _updateLighting();
-    _motionAccumulator += dt.isFinite ? dt.clamp(0, .1) : 0;
-    if (_motionAccumulator < 1 / 30) return;
-    _motionAccumulator %= 1 / 30;
-    for (final moving in _moving) {
-      final m = moving.part.motion!;
-      if (!nearby.contains(m.id) ||
-          !activity.motionEnabled(m.id) ||
-          eye.distanceToSquared(moving.center) > moving.range * moving.range) {
-        continue;
-      }
-      activity.writeDelta(m.id, moving.delta);
-      moving.actual.setFrom(moving.entityTransform);
-      moving.actual.multiply(moving.delta);
-      moving.actual.multiply(moving.part.transform);
-      // flutter_scene invalidates aggregate and per-instance bounds here, so
-      // visibility follows the current pose rather than the original position.
-      moving.part.mesh.setInstanceTransform(moving.slot, moving.actual);
-    }
   }
 
   void _updateLighting({bool force = false}) {
@@ -371,12 +517,14 @@ class VrlwSceneAdapter {
     if (lighting == null || (!force && _lightingAccumulator < .2)) return;
     _lightingAccumulator %= .2;
     lighting.sample(activity.activeSeconds);
-    final sky = _cycleSky!;
-    sky.sunDirection.setFrom(lighting.sunDirection);
-    sky.sunColor.setFrom(lighting.sunColor);
-    sky.zenithColor.setFrom(lighting.zenithColor);
-    sky.horizonColor.setFrom(lighting.horizonColor);
-    sky.groundColor.setFrom(lighting.groundColor);
+    final sky = _cycleSky;
+    if (sky != null) {
+      sky.sunDirection.setFrom(lighting.sunDirection);
+      sky.sunColor.setFrom(lighting.sunColor);
+      sky.zenithColor.setFrom(lighting.zenithColor);
+      sky.horizonColor.setFrom(lighting.horizonColor);
+      sky.groundColor.setFrom(lighting.groundColor);
+    }
     final sun = scene.directionalLight!;
     sun.direction.setFrom(lighting.lightDirection);
     sun.color.setFrom(lighting.lightColor);
@@ -458,37 +606,76 @@ class VrlwSceneAdapter {
     _disposed = true;
     _subscription.cancel();
     cache.dispose();
+    _residentChanges.clear();
     scene.onError = null;
     scene.root.removeAll();
+    // SceneView(scene) does not own an application-supplied scene. Removing
+    // nodes alone leaves this scene's per-eye render rings and history targets
+    // retained until GC. Explicit disposal drops those references now; native
+    // GPU memory can still be collected/released asynchronously by the engine.
+    scene.dispose();
     _parts.clear();
-    _moving.clear();
-    _nearbyMotions.clear();
+    _residentEntities = const [];
+    _lod.clear();
+    _motionRuntime.clear();
   }
 }
 
+/// Scanned once during import, with authored node transforms and the importer's
+/// handedness already resolved. No vertex traversal occurs during LOD updates.
+class _LodBoundsAccumulator {
+  double minX = double.infinity, minY = double.infinity, minZ = double.infinity;
+  double maxX = double.negativeInfinity,
+      maxY = double.negativeInfinity,
+      maxZ = double.negativeInfinity;
+  final point = vm.Vector3.zero();
+
+  void include(Float32List positions, vm.Matrix4 transform) {
+    for (var i = 0; i < positions.length; i += 3) {
+      point.setValues(positions[i], positions[i + 1], positions[i + 2]);
+      transform.transform3(point);
+      if (point.x < minX) minX = point.x;
+      if (point.y < minY) minY = point.y;
+      if (point.z < minZ) minZ = point.z;
+      if (point.x > maxX) maxX = point.x;
+      if (point.y > maxY) maxY = point.y;
+      if (point.z > maxZ) maxZ = point.z;
+    }
+  }
+
+  VrlwLodBounds finish() => VrlwLodBounds(
+    minX: minX,
+    minY: minY,
+    minZ: minZ,
+    maxX: maxX,
+    maxY: maxY,
+    maxZ: maxZ,
+  );
+}
+
 class _Part {
-  _Part(this.mesh, this.transform, this.triangles, this.motion);
+  _Part(this.mesh, this.node, this.transform, this.triangles, this.motion)
+    : motionBatch = motion == null
+          ? null
+          : VrlwMotionBatch(
+              (write) => mesh.updateInstanceTransforms(
+                write,
+                // Validated spin/bob/path deltas contain only translation and
+                // proper rotation: they cannot change local winding, including
+                // a mirrored entity or GLB transform. Initial addInstance has
+                // already captured that parity. Parent-node parity is handled
+                // separately by flutter_scene. If scaling/reflection becomes a
+                // motion kind, this contract must change. The batch API still
+                // invalidates aggregate/per-instance bounds and GPU data.
+                recomputeWinding: false,
+              ),
+            );
   final fs.InstancedMesh mesh;
+  final fs.Node node;
   final vm.Matrix4 transform;
   final int triangles;
   final VrlwMotionSpec? motion;
-}
-
-class _MovingInstance {
-  _MovingInstance(
-    this.part,
-    this.slot,
-    this.entityTransform,
-    this.center,
-    this.range,
-  );
-  final _Part part;
-  final int slot;
-  final vm.Matrix4 entityTransform;
-  final vm.Vector3 center;
-  final double range;
-  final delta = vm.Matrix4.identity();
-  final actual = vm.Matrix4.identity();
+  final VrlwMotionBatch? motionBatch;
 }
 
 typedef _MaterialKey = (

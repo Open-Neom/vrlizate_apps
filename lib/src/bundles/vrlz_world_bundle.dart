@@ -9,6 +9,8 @@ import 'vrz_glb.dart';
 import 'vrz_zip.dart';
 import 'vrlw_audio_policy.dart';
 import 'vrlw_motion_profile.dart';
+import 'vrlw_lod_profile.dart';
+import 'vrlw_texture_policy.dart';
 
 /// A portable data-only experience. Renderers and Dart code belong to the host;
 /// embedded worlds provide bounded placements, validated models and textures.
@@ -272,6 +274,9 @@ final class VrlzWorldBundle {
   Future<VrlzPreparedWorld> openWorld(String alias) async {
     final world = manifest.world(alias);
     final index = _indices[alias]!;
+    for (final resource in index.resources) {
+      VrlwTexturePolicy.validateDecoder(resource.type);
+    }
     final data = _files[alias]!;
     final resources = <String, Uint8List>{};
     for (final resource in index.resources) {
@@ -292,6 +297,7 @@ final class VrlzWorldBundle {
       }
       resources[resource.id] = decoded;
     }
+    VrlwLodProfile.validate(index, resources);
     VrlwMotionProfile.validate(index, resources);
     final source = VrlwMemorySource(data);
     try {

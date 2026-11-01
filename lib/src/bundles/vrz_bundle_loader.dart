@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 
 import '../catalog/vrlz_web_catalog.dart';
+import 'vrlw_http_source.dart' show isPrivateLanOrLoopbackHost;
 import 'vrlz_package.dart';
 import 'vrz_bundle.dart';
 
@@ -25,6 +26,7 @@ final class VrlzPackageLoader extends _BundleLoader<VrlzPackage> {
     super.timeout = const Duration(seconds: 30),
     super.maxDownloadBytes = VrlzPackage.maxBytes,
     super.maxRedirects = 3,
+    super.allowPrivateLanHttp = false,
   }) : super(decode: VrlzPackage.decode);
 }
 
@@ -78,11 +80,15 @@ final class VrlzWebCatalogLoader extends _BundleLoader<VrlzWebCatalog> {
     super.timeout = const Duration(seconds: 30),
     super.maxDownloadBytes = VrlzWebCatalog.maxBytes,
     super.maxRedirects = 3,
+    super.allowPrivateLanHttp = false,
   }) : super(
          maxAllowedDownloadBytes: VrlzWebCatalog.maxBytes,
          accept: 'application/json',
-         decode: (bytes, {source}) =>
-             VrlzWebCatalog.decode(bytes, source: source!),
+         decode: (bytes, {source}) => VrlzWebCatalog.decode(
+           bytes,
+           source: source!,
+           allowPrivateLanHttp: allowPrivateLanHttp,
+         ),
        );
 
   Future<VrlzPackage> loadPackage(VrlzWebCatalogEntry entry) => _load(
@@ -121,6 +127,7 @@ class _BundleLoader<T> {
     this.maxDownloadBytes = VrzBundle.maxBytes,
     this.maxRedirects = 3,
     this.allowLocalHttp = false,
+    this.allowPrivateLanHttp = false,
     int maxAllowedDownloadBytes = VrzBundle.maxBytes,
     String accept = _packageAccept,
   }) : _client = client ?? http.Client(),
@@ -144,6 +151,7 @@ class _BundleLoader<T> {
   final int maxDownloadBytes;
   final int maxRedirects;
   final bool allowLocalHttp;
+  final bool allowPrivateLanHttp;
   final _active = <_Download>[];
   bool _closed = false;
 
@@ -276,7 +284,12 @@ class _BundleLoader<T> {
         allowLocalHttp &&
         uri.scheme == 'http' &&
         const {'127.0.0.1', '::1'}.contains(uri.host);
-    if ((uri.scheme != 'https' && !local) ||
+    final privateLan =
+        allowPrivateLanHttp &&
+        uri.scheme == 'http' &&
+        isPrivateLanOrLoopbackHost(uri.host) &&
+        uri.pathSegments.where((s) => s.isNotEmpty).isNotEmpty;
+    if ((uri.scheme != 'https' && !local && !privateLan) ||
         uri.host.isEmpty ||
         uri.userInfo.isNotEmpty ||
         uri.hasFragment ||
