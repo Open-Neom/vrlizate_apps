@@ -473,16 +473,7 @@ class VrlwSceneAdapter {
       if (!isCurrent()) throw StateError('World opening cancelled.');
       final fallbackSkybox =
           authoredSky == null && cycle == null && fs.Scene.isReadyToRender
-          ? fs.Skybox(
-              fs.GradientSkySource(
-                zenithColor: vm.Vector3(0.09, 0.22, 0.48),
-                horizonColor: vm.Vector3(0.46, 0.62, 0.82),
-                groundColor: vm.Vector3(0.16, 0.15, 0.14),
-                sunDirection: -sunDir,
-                sunColor: sunColor * 1.8,
-                sunSharpness: 320,
-              ),
-            )
+          ? _fallbackSkyForWorld(reader.index.id, sunDir, sunColor)
           : null;
       final sun = fs.DirectionalLight(
         direction: sunDir,
@@ -499,9 +490,11 @@ class VrlwSceneAdapter {
         ..toneMapping = fs.ToneMappingMode.pbrNeutral
         ..directionalLight = sun;
       if (cycle != null) {
-        // A constant diffuse floor is cheap and needs no additional GPU bake.
-        // An explicitly authored environment remains the lighting source.
-        if (env?.environmentResource == null) {
+        // Keep studio prefiltered radiance when the GPU is active so metallic
+        // trims, glass, and water preserve crisp specular reflections across
+        // the dynamic cycle; fall back to constant diffuse only in headless
+        // tests without an active GPU renderer.
+        if (env?.environmentResource == null && !fs.Scene.isReadyToRender) {
           adapter.scene.environment = fs.EnvironmentMap.constantDiffuse(
             vm.Vector3(.22, .25, .32),
           );
@@ -678,10 +671,15 @@ class VrlwSceneAdapter {
     _updateLighting();
   }
 
+  static const double _lightingStepSeconds = 1 / 30;
+
   void _updateLighting({bool force = false}) {
     final lighting = _dayNight;
-    if (lighting == null || (!force && _lightingAccumulator < .2)) return;
-    _lightingAccumulator %= .2;
+    if (lighting == null ||
+        (!force && _lightingAccumulator < _lightingStepSeconds)) {
+      return;
+    }
+    _lightingAccumulator %= _lightingStepSeconds;
     lighting.sample(activity.activeSeconds);
     final sky = _cycleSky;
     if (sky != null) {
@@ -697,6 +695,65 @@ class VrlwSceneAdapter {
     sun.intensity = lighting.sunIntensity;
     scene.environmentIntensity = lighting.environmentIntensity;
     scene.exposure = lighting.exposure;
+  }
+
+  static fs.Skybox _fallbackSkyForWorld(
+    String worldId,
+    vm.Vector3 sunDir,
+    vm.Vector3 sunColor,
+  ) {
+    final id = worldId.toLowerCase();
+    var zenith = vm.Vector3(0.09, 0.22, 0.48);
+    var horizon = vm.Vector3(0.46, 0.62, 0.82);
+    var ground = vm.Vector3(0.16, 0.15, 0.14);
+    var sunScale = 1.8;
+    var sharpness = 320.0;
+
+    if (id.contains('lunar') ||
+        id.contains('spaceport') ||
+        id.contains('orbital') ||
+        id.contains('astral')) {
+      zenith = vm.Vector3(0.008, 0.012, 0.032);
+      horizon = vm.Vector3(0.035, 0.055, 0.115);
+      ground = vm.Vector3(0.06, 0.06, 0.07);
+      sunScale = 2.6;
+      sharpness = 720.0;
+    } else if (id.contains('volcanic')) {
+      zenith = vm.Vector3(0.08, 0.025, 0.02);
+      horizon = vm.Vector3(0.52, 0.16, 0.05);
+      ground = vm.Vector3(0.18, 0.05, 0.02);
+      sunScale = 2.2;
+      sharpness = 220.0;
+    } else if (id.contains('cavern') || id.contains('fungal')) {
+      zenith = vm.Vector3(0.02, 0.04, 0.09);
+      horizon = vm.Vector3(0.07, 0.18, 0.26);
+      ground = vm.Vector3(0.03, 0.05, 0.07);
+      sunScale = 0.8;
+      sharpness = 140.0;
+    } else if (id.contains('coral')) {
+      zenith = vm.Vector3(0.02, 0.16, 0.28);
+      horizon = vm.Vector3(0.06, 0.38, 0.48);
+      ground = vm.Vector3(0.03, 0.10, 0.14);
+      sunScale = 1.1;
+      sharpness = 120.0;
+    } else if (id.contains('neon') || id.contains('cypherpunk')) {
+      zenith = vm.Vector3(0.03, 0.02, 0.11);
+      horizon = vm.Vector3(0.24, 0.08, 0.32);
+      ground = vm.Vector3(0.04, 0.03, 0.07);
+      sunScale = 1.3;
+      sharpness = 260.0;
+    }
+
+    return fs.Skybox(
+      fs.GradientSkySource(
+        zenithColor: zenith,
+        horizonColor: horizon,
+        groundColor: ground,
+        sunDirection: -sunDir,
+        sunColor: sunColor * sunScale,
+        sunSharpness: sharpness,
+      ),
+    );
   }
 
   /// Validates structural integrity (unique IDs, valid prototype geometry and

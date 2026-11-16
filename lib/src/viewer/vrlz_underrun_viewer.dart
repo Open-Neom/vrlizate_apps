@@ -483,24 +483,37 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
 
   void _rebuildStaticSectorMeshes() {
     _builtSector = _game.sector;
+    const tile = Underrun3dGame.tileMeters;
 
     final walls = _wallBatch!;
     if (walls.instanceCount > 0) walls.clearInstances();
     for (final w in _game.walls) {
-      final m = vm.Matrix4.translationValues(
-        w.centerX,
-        w.heightMeters * 0.5,
-        w.centerZ,
-      )..scaleByVector3(
-        vm.Vector3(w.widthMeters, w.heightMeters, w.depthMeters),
-      );
-      walls.addInstance(m);
+      // Subdivide merged wall spans into `tileMeters` (2 m) visual segments so
+      // `sciFiTrimSheet` UVs keep crisp 1:1 texel density instead of stretching
+      // up to 40x across long corridors (physics still uses merged colliders).
+      final segsX = math.max(1, (w.widthMeters / tile).round());
+      final segsZ = math.max(1, (w.depthMeters / tile).round());
+      final segW = w.widthMeters / segsX;
+      final segD = w.depthMeters / segsZ;
+      final minX = w.centerX - w.widthMeters * 0.5;
+      final minZ = w.centerZ - w.depthMeters * 0.5;
+      for (var ix = 0; ix < segsX; ix++) {
+        final cx = minX + (ix + 0.5) * segW;
+        for (var iz = 0; iz < segsZ; iz++) {
+          final cz = minZ + (iz + 0.5) * segD;
+          final m = vm.Matrix4.translationValues(
+            cx,
+            w.heightMeters * 0.5,
+            cz,
+          )..scaleByVector3(vm.Vector3(segW, w.heightMeters, segD));
+          walls.addInstance(m);
+        }
+      }
     }
     _wallNode?.visible = walls.instanceCount > 0;
 
     final floors = _floorBatch!;
     if (floors.instanceCount > 0) floors.clearInstances();
-    const tile = Underrun3dGame.tileMeters;
     for (final (gx, gz) in _game.floorTiles) {
       final m = vm.Matrix4.translationValues(
         Underrun3dGame.cellCenter(gx),
@@ -894,132 +907,142 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
               },
               onTick: _tick,
             ),
+            IgnorePointer(
+              child: StereoHudOverlay(
+                alignment: Alignment.topCenter,
+                padding: const EdgeInsets.only(top: 14, left: 16, right: 16),
+                depthDisparity: 4.0,
+                child: ValueListenableBuilder<_HudSnapshot>(
+                  valueListenable: _hud,
+                  builder: (_, snap, _) => Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xCC0B131E),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0x6600E5FF)),
+                    ),
+                    child: Text(
+                      'UNDERRUN 3D · S${snap.sector}/3  |  '
+                      'CPU ${snap.cpusRebooted}/${snap.cpusTotal}  |  '
+                      'HP ${'▮' * snap.health}${'▯' * (5 - snap.health)}  |  '
+                      'KILLS ${snap.kills}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFFE0F7FA),
+                        fontSize: 10.5,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            IgnorePointer(
+              child: StereoHudOverlay(
+                alignment: const Alignment(0.0, 0.72),
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                depthDisparity: 4.0,
+                child: ValueListenableBuilder<_HudSnapshot>(
+                  valueListenable: _hud,
+                  builder: (_, snap, _) => snap.notice.isEmpty
+                      ? const SizedBox.shrink()
+                      : Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xD9091019),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: snap.completed
+                                  ? const Color(0xFF00E676)
+                                  : const Color(0x88FF9100),
+                            ),
+                          ),
+                          child: Text(
+                            snap.notice,
+                            textAlign: TextAlign.center,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xFFFFD180),
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+            ),
             Positioned(
               top: 10,
-              left: 14,
               right: 14,
               child: SafeArea(
                 bottom: false,
-                child: ValueListenableBuilder<_HudSnapshot>(
-                  valueListenable: _hud,
-                  builder: (_, snap, _) => Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xCC0B131E),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: const Color(0x6600E5FF)),
-                        ),
-                        child: Text(
-                          'UNDERRUN 3D · SECTOR ${snap.sector}/3  |  '
-                          'CPU ${snap.cpusRebooted}/${snap.cpusTotal}  |  '
-                          'HP ${'▮' * snap.health}${'▯' * (5 - snap.health)}  |  '
-                          'KILLS ${snap.kills}',
-                          style: const TextStyle(
-                            color: Color(0xFFE0F7FA),
-                            fontSize: 11.5,
-                            fontFamily: 'monospace',
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton.filledTonal(
+                      tooltip: _tacticalChaseView
+                          ? 'Vista 1ª Persona VR'
+                          : 'Vista Táctica 3D',
+                      onPressed: () {
+                        setState(() {
+                          _tacticalChaseView = !_tacticalChaseView;
+                          _playerAvatarNode?.visible = _tacticalChaseView;
+                        });
+                      },
+                      icon: Icon(
+                        _tacticalChaseView
+                            ? Icons.vrpano_rounded
+                            : Icons.grid_view_rounded,
+                        size: 18,
                       ),
-                      const Spacer(),
-                      IconButton.filledTonal(
-                        tooltip: _tacticalChaseView
-                            ? 'Vista 1ª Persona VR'
-                            : 'Vista Táctica 3D',
-                        onPressed: () {
-                          setState(() {
-                            _tacticalChaseView = !_tacticalChaseView;
-                            _playerAvatarNode?.visible = _tacticalChaseView;
-                          });
-                        },
-                        icon: Icon(
-                          _tacticalChaseView
-                              ? Icons.vrpano_rounded
-                              : Icons.grid_view_rounded,
-                          size: 18,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton.filledTonal(
-                        tooltip: 'Salir',
-                        onPressed: _exit,
-                        icon: const Icon(Icons.close_rounded, size: 18),
-                      ),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip: 'Salir',
+                      onPressed: _exit,
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                    ),
+                  ],
                 ),
               ),
             ),
             Positioned(
               bottom: 18,
-              left: 24,
               right: 24,
               child: SafeArea(
                 top: false,
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: ValueListenableBuilder<_HudSnapshot>(
-                        valueListenable: _hud,
-                        builder: (_, snap, _) => snap.notice.isEmpty
-                            ? const SizedBox.shrink()
-                            : Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 8,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xD9091019),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color: snap.completed
-                                        ? const Color(0xFF00E676)
-                                        : const Color(0x88FF9100),
-                                  ),
-                                ),
-                                child: Text(
-                                  snap.notice,
-                                  style: const TextStyle(
-                                    color: Color(0xFFFFD180),
-                                    fontSize: 12,
-                                    fontFamily: 'monospace',
-                                  ),
-                                ),
-                              ),
+                child: Listener(
+                  onPointerDown: (_) => _touchFireHeld = true,
+                  onPointerUp: (_) => _touchFireHeld = false,
+                  onPointerCancel: (_) => _touchFireHeld = false,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xCCFF6D00),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: const Text(
+                      'PLASMA',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.1,
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Listener(
-                      onPointerDown: (_) => _touchFireHeld = true,
-                      onPointerUp: (_) => _touchFireHeld = false,
-                      onPointerCancel: (_) => _touchFireHeld = false,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xCCFF6D00),
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        child: const Text(
-                          'PLASMA',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 1.1,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
