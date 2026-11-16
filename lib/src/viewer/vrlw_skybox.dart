@@ -11,14 +11,21 @@ Future<T?> loadVrlwAuthoredSky<T>(
   required String Function(String id) resourceType,
   required Future<T> Function(String id) fromEnvironment,
   required Future<T> Function(String id) fromTexture,
+  bool allowKtx2Textures = false,
 }) async {
   final id = environment?.skyboxResource;
   if (id == null) return null;
   final type = resourceType(id);
-  VrlwTexturePolicy.validateDecoder(type);
+  VrlwTexturePolicy.validateDecoder(
+    type,
+    allowKtx2Textures: allowKtx2Textures,
+  );
   return switch (type) {
     'environment.ktx2' => fromEnvironment(id),
-    'texture.rgba8' || 'texture.png' || 'texture.jpeg' => fromTexture(id),
+    'texture.rgba8' ||
+    'texture.png' ||
+    'texture.jpeg' ||
+    'texture.ktx2' => fromTexture(id),
     _ => throw const FormatException('Unsupported visible sky resource.'),
   };
 }
@@ -39,17 +46,22 @@ fs.Skybox vrlwEnvironmentSkybox(fs.EnvironmentMap environment) => fs.Skybox(
 
 /// The image is an sRGB equirectangular panorama. Its mip chain is reused;
 /// the black radiance placeholder is never visible at blurriness zero.
-fs.Skybox vrlwTextureSkybox(fs.Texture2D texture, fs.EnvironmentMap empty) =>
-    fs.Skybox(
-      _skySource(
-        radiance: empty.prefilteredRadiance,
-        cube: false,
-        mip: false,
-        background: texture.gpuTexture,
-        hasBackground: true,
-        backgroundIsLinear: false,
-      ),
-    );
+fs.Skybox vrlwTextureSkybox(fs.TextureSource texture, fs.EnvironmentMap empty) {
+  final gpuTex = texture.sampledTexture;
+  if (gpuTex == null) {
+    throw StateError('Skybox texture source has no realized GPU texture.');
+  }
+  return fs.Skybox(
+    _skySource(
+      radiance: empty.prefilteredRadiance,
+      cube: false,
+      mip: false,
+      background: gpuTex,
+      hasBackground: true,
+      backgroundIsLinear: false,
+    ),
+  );
+}
 
 fs.ShaderSkySource _skySource({
   required gpu.Texture radiance,

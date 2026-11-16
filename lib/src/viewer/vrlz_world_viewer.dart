@@ -390,6 +390,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
         isCurrent: current,
         debugForceHighestLod: !widget.distanceLod,
         isV2: prepared.isV2,
+        qualityTier: widget.quality?.tier,
         activity: _activities.putIfAbsent(
           prepared.reader.index.id,
           () => VrlwWorldActivity(prepared!.reader.index),

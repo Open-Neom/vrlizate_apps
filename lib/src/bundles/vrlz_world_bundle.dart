@@ -521,7 +521,10 @@ final class VrlzWorldBundle {
       final index = _indices[world.alias]!;
       final data = _files[world.alias]!;
       for (final resource in index.resources) {
-        VrlwTexturePolicy.validateDecoder(resource.type);
+        VrlwTexturePolicy.validateDecoder(
+          resource.type,
+          allowKtx2Textures: isV2,
+        );
       }
       var worldVram = 0;
       final resources = <String, Uint8List>{};
@@ -541,6 +544,13 @@ final class VrlzWorldBundle {
           );
           worldVram += stats.estimatedVramBytes + decoded.length;
           peakTriangles = math.max(peakTriangles, stats.submittedTriangles);
+        } else if (resource.type == 'texture.ktx2') {
+          final info = VrlwTexturePolicy.validateKtx2Payload(
+            decoded,
+            declaredWidth: resource.width,
+            declaredHeight: resource.height,
+          );
+          worldVram += info.estimatedGpuVramBytes;
         } else if (resource.type.startsWith('audio.')) {
           VrlwAudioPolicy.validate(decoded);
         } else {
@@ -593,7 +603,10 @@ final class VrlzWorldBundle {
     final world = manifest.world(alias);
     final index = _indices[alias]!;
     for (final resource in index.resources) {
-      VrlwTexturePolicy.validateDecoder(resource.type);
+      VrlwTexturePolicy.validateDecoder(
+        resource.type,
+        allowKtx2Textures: isV2,
+      );
     }
 
     final streamArchive = _streamArchive;
@@ -620,6 +633,12 @@ final class VrlzWorldBundle {
                   isV2 ? maxModelTrianglesV2 : maxModelTriangles,
               allowEmbeddedBaseColorTextures: true,
               allowV2Graphics: isV2,
+            );
+          } else if (resource.type == 'texture.ktx2') {
+            VrlwTexturePolicy.validateKtx2Payload(
+              decoded,
+              declaredWidth: resource.width,
+              declaredHeight: resource.height,
             );
           } else if (resource.type.startsWith('audio.')) {
             VrlwAudioPolicy.validate(decoded);
@@ -661,6 +680,12 @@ final class VrlzWorldBundle {
           maxSubmittedTriangles: isV2 ? maxModelTrianglesV2 : maxModelTriangles,
           allowEmbeddedBaseColorTextures: true,
           allowV2Graphics: isV2,
+        );
+      } else if (resource.type == 'texture.ktx2') {
+        VrlwTexturePolicy.validateKtx2Payload(
+          decoded,
+          declaredWidth: resource.width,
+          declaredHeight: resource.height,
         );
       } else if (resource.type.startsWith('audio.')) {
         VrlwAudioPolicy.validate(decoded);

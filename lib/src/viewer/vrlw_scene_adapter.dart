@@ -119,10 +119,25 @@ class VrlwSceneAdapter {
     bool debugForceHighestLod = false,
     bool softResidencyBudget = true,
     bool isV2 = false,
+    VrQualityTier? qualityTier,
   }) async {
     // Also protect direct adapter callers before creating any scene resources.
     for (final resource in reader.index.resources) {
-      VrlwTexturePolicy.validateDecoder(resource.type);
+      VrlwTexturePolicy.validateDecoder(
+        resource.type,
+        allowKtx2Textures: isV2,
+      );
+      if (resource.type == 'texture.ktx2') {
+        final payload = resources[resource.id];
+        if (payload == null) {
+          throw FormatException('Missing texture.ktx2 payload: ${resource.id}');
+        }
+        VrlwTexturePolicy.validateKtx2Payload(
+          payload,
+          declaredWidth: resource.width,
+          declaredHeight: resource.height,
+        );
+      }
     }
     final adapter = VrlwSceneAdapter._(
       reader,
@@ -132,45 +147,77 @@ class VrlwSceneAdapter {
     );
     try {
       final models = <String, fs.Node>{};
-      final textures = <String, fs.Texture2D>{};
+      final textures = <String, fs.TextureSource>{};
       final materials = VrSceneMaterialCache();
       // Retain only counts, never copied vertex data, between imported parts.
       final triangleCounts = Map<fs.Geometry, int>.identity();
       final geometryFingerprints = Map<fs.Geometry, String>.identity();
       var primitiveCount = 0;
-      const sampling = fs.TextureSampling(maxAnisotropy: 8);
+      final budget = qualityTier != null
+          ? VrTextureBudget.forTier(qualityTier)
+          : null;
+      final defaultSampling = budget != null
+          ? budget.samplingForRole(VrTextureRole.heroSurface)
+          : const fs.TextureSampling(maxAnisotropy: 8);
+      final ormSampling = budget != null
+          ? budget.samplingForRole(VrTextureRole.ormData)
+          : const fs.TextureSampling(maxAnisotropy: 8);
       final maxPrimitiveGroups = isV2 ? 512 : 128;
       final maxGlbTexDim = isV2
-          ? VrzGlbV2Limits.maxDimension
+          ? (budget != null
+                ? budget.maxDimensionForRole(VrTextureRole.heroSurface)
+                : VrzGlbV2Limits.maxDimension)
           : VrzGlbTextureLimits.maxDimension;
 
-      Future<fs.Texture2D?> loadTexture(
+      Future<fs.TextureSource?> loadTexture(
         String? textureId,
-        fs.TextureContent content,
-      ) async {
+        fs.TextureContent content, {
+        VrTextureRole role = VrTextureRole.heroSurface,
+      }) async {
         if (textureId == null) return null;
-        final cached = textures['$textureId:${content.name}'];
+        final cacheKey = '$textureId:${content.name}:${role.name}';
+        final cached = textures[cacheKey];
         if (cached != null) return cached;
         final meta = reader.index.resourceAt(textureId)!;
         final bytes = resources[textureId]!;
-        final fs.Texture2D loaded;
-        if (meta.type == 'texture.rgba8') {
+        final activeSampling = role == VrTextureRole.ormData ||
+                content == fs.TextureContent.data
+            ? ormSampling
+            : (role == VrTextureRole.sky
+                  ? const fs.TextureSampling(maxAnisotropy: 1)
+                  : defaultSampling);
+        final roleCap = budget?.maxDimensionForRole(role, content: content);
+        final fs.TextureSource loaded;
+        if (meta.type == 'texture.ktx2') {
+          loaded = await VrKtx2TextureLoader.load(
+            bytes,
+            content: content,
+            sampling: activeSampling,
+            maxTextureSize: roleCap,
+          );
+        } else if (meta.type == 'texture.rgba8') {
           loaded = fs.Texture2D.fromPixels(
             bytes,
             meta.width!,
             meta.height!,
             content: content,
-            sampling: sampling,
+            sampling: activeSampling,
           );
         } else {
+          final formatMax = isV2
+              ? VrlwTexturePolicy.maxV2Ktx2Dimension
+              : VrlwBundleCodec.maxCompressedTextureDimension;
+          final effectiveMax = roleCap != null && roleCap < formatMax
+              ? roleCap
+              : formatMax;
           loaded = await fs.Texture2D.fromEncodedBytes(
             bytes,
             content: content,
-            sampling: sampling,
-            maxSize: VrlwBundleCodec.maxCompressedTextureDimension,
+            sampling: activeSampling,
+            maxSize: effectiveMax,
           );
         }
-        textures['$textureId:${content.name}'] = loaded;
+        textures[cacheKey] = loaded;
         return loaded;
       }
 
@@ -196,14 +243,17 @@ class VrlwSceneAdapter {
         final metallicRoughness = await loadTexture(
           binding.metallicRoughnessTexture,
           fs.TextureContent.data,
+          role: VrTextureRole.ormData,
         );
         final emissive = await loadTexture(
           binding.emissiveTexture,
           fs.TextureContent.color,
+          role: VrTextureRole.prop,
         );
         final occlusion = await loadTexture(
           binding.occlusionTexture,
           fs.TextureContent.data,
+          role: VrTextureRole.ormData,
         );
         if (!isCurrent()) throw StateError('World opening cancelled.');
         if (binding.collider != null) {
@@ -405,11 +455,16 @@ class VrlwSceneAdapter {
           : vm.Vector3(1, .96, .9);
       final authoredSky = await loadVrlwAuthoredSky<fs.Skybox>(
         env,
+        allowKtx2Textures: isV2,
         resourceType: (id) => reader.index.resourceAt(id)!.type,
         fromEnvironment: (id) async =>
             vrlwEnvironmentSkybox(await loadEnvironment(id)),
         fromTexture: (id) async => vrlwTextureSkybox(
-          (await loadTexture(id, fs.TextureContent.color))!,
+          (await loadTexture(
+            id,
+            fs.TextureContent.color,
+            role: VrTextureRole.sky,
+          ))!,
           fs.EnvironmentMap.empty(),
         ),
       );

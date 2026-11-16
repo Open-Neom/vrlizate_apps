@@ -193,6 +193,14 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
       cornerSegments: 2,
       bevelSegments: 2,
     );
+    final groundedWallUnit = VrSculptedGeometry.beveledBox(
+      vm.Vector3(1, 1, 1),
+      cornerRadius: 0.048,
+      bevelZ: 0.048,
+      cornerSegments: 2,
+      bevelSegments: 2,
+      groundAoStrength: 0.38,
+    );
     final crystalGeo = VrSculptedGeometry.facetedCrystal(
       radius: 0.34,
       height: 0.86,
@@ -203,6 +211,7 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
       topRadius: 0.42,
       height: 1.24,
       segments: 18,
+      groundAoStrength: 0.36,
     );
     final spiderCarapaceGeo = VrSculptedGeometry.octaCore(
       radius: 0.44,
@@ -218,6 +227,7 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
       topRadius: 0.40,
       height: 1.12,
       segments: 16,
+      groundAoStrength: 0.36,
     );
     final sentryHeadGeo = VrSculptedGeometry.beveledBox(
       vm.Vector3(0.76, 0.48, 0.96),
@@ -258,8 +268,8 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
       ..baseColorFactor = vm.Vector4(0.18, 0.22, 0.29, 1.0)
       ..metallicFactor = 0.78
       ..roughnessFactor = 0.46
-      ..vertexColorWeight = 0.0;
-    _wallBatch = makeBatch(beveledUnit, _wallMat!, (n) => _wallNode = n);
+      ..vertexColorWeight = 1.0;
+    _wallBatch = makeBatch(groundedWallUnit, _wallMat!, (n) => _wallNode = n);
 
     _floorMat = fs.PhysicallyBasedMaterial()
       ..baseColorFactor = vm.Vector4(0.09, 0.12, 0.17, 1.0)
@@ -272,7 +282,7 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
       ..baseColorFactor = vm.Vector4(0.15, 0.19, 0.26, 1.0)
       ..metallicFactor = 0.85
       ..roughnessFactor = 0.34
-      ..vertexColorWeight = 0.0;
+      ..vertexColorWeight = 1.0;
     _cpuPedestalBatch = makeBatch(
       cpuPedestalGeo,
       _cpuBaseMat!,
@@ -328,7 +338,7 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
         ..baseColorFactor = vm.Vector4(0.20, 0.16, 0.20, 1.0)
         ..metallicFactor = 0.88
         ..roughnessFactor = 0.34
-        ..vertexColorWeight = 0.0,
+        ..vertexColorWeight = 1.0,
       (n) => _sentryBaseNode = n,
     );
 
@@ -408,31 +418,34 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
 
   Future<void> _dressSectorMaterials() async {
     bool isCurrent() => mounted;
+    final tier = widget.quality?.tier;
     await Future.wait([
       if (_wallMat != null)
         PbrTextureLibrary.apply(
           _wallMat!,
           const PbrTextureRequest(
-            PbrSurface.techPanels,
-            size: 256,
+            PbrSurface.sciFiTrimSheet,
+            size: 512,
             seed: 301,
             primary: 0xFF6B7D96,
-            secondary: 0xFF1A222E,
+            secondary: 0xFFD97A2B,
             repeats: 2,
             reliefStrength: 1.0,
           ),
           isCurrent: isCurrent,
-          tiles: vm.Vector2(2, 1),
-          normalScale: 0.85,
-          metallicFactor: 0.88,
+          tiles: vm.Vector2(1, 1),
+          normalScale: 0.90,
+          metallicFactor: 0.90,
           roughnessFactor: 0.95,
+          qualityTier: tier,
+          role: VrTextureRole.heroSurface,
         ),
       if (_floorMat != null)
         PbrTextureLibrary.apply(
           _floorMat!,
           const PbrTextureRequest(
             PbrSurface.sciFiGrating,
-            size: 256,
+            size: 512,
             seed: 307,
             primary: 0xFF4A5A70,
             secondary: 0xFF101620,
@@ -444,6 +457,8 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
           normalScale: 0.90,
           metallicFactor: 0.84,
           roughnessFactor: 0.95,
+          qualityTier: tier,
+          role: VrTextureRole.floor,
         ),
       if (_cpuBaseMat != null)
         PbrTextureLibrary.apply(
@@ -460,6 +475,8 @@ class _Underrun3dPlayerState extends State<_Underrun3dPlayer> {
           tiles: vm.Vector2(2, 2),
           normalScale: 0.75,
           metallicFactor: 0.88,
+          qualityTier: tier,
+          role: VrTextureRole.prop,
         ),
     ]);
   }
