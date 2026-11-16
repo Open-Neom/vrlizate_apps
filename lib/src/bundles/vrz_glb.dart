@@ -11,8 +11,8 @@ abstract final class VrzGlbTextureLimits {
   static const maxDecodedBytes = 1024 * 1024;
 }
 
-/// Admission limits for the v2 PBR/KTX2/meshopt/animation GLB profile.
-abstract final class VrzGlbV2Limits {
+/// Admission limits for the extended v1 PBR/KTX2/meshopt/animation GLB profile.
+abstract final class VrzGlbExtendedLimits {
   static const maxImages = 32;
   static const maxDimension = 2048;
   static const maxEstimatedVramBytes = 16 * 1024 * 1024;
@@ -66,20 +66,21 @@ const List<int> _ktx2Magic = <int>[
 ];
 
 /// The scene subset is intentionally smaller than all of glTF 2.0.
-/// Existing v1 VRZ scenes remain texture-free; portable worlds v1 opt into
-/// bounded base-color PNGs, and v2 scenes/worlds opt into PBR, KTX2 BasisU,
-/// meshopt compression, lightmap UVs (`TEXCOORD_1`), skinning, and animations.
+/// Base `vrlizate.scene.v1` scenes remain texture-free; base `vrlizate.worlds.v1`
+/// places opt into bounded base-color PNGs, and extended `v1` capabilities opt into
+/// PBR, KTX2 BasisU, meshopt compression, lightmap UVs (`TEXCOORD_1`), skinning,
+/// and animations.
 void validateVrzGlb(
   Uint8List bytes, {
   int maxSubmittedTriangles = 250000,
   bool allowEmbeddedBaseColorTextures = false,
-  bool allowV2Graphics = false,
+  bool allowExtendedGraphics = false,
 }) {
   inspectVrzGlbStats(
     bytes,
     maxSubmittedTriangles: maxSubmittedTriangles,
     allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
-    allowV2Graphics: allowV2Graphics,
+    allowExtendedGraphics: allowExtendedGraphics,
   );
 }
 
@@ -88,7 +89,7 @@ VrzGlbStats inspectVrzGlbStats(
   Uint8List bytes, {
   int maxSubmittedTriangles = 250000,
   bool allowEmbeddedBaseColorTextures = false,
-  bool allowV2Graphics = false,
+  bool allowExtendedGraphics = false,
 }) {
   Never fail(String message) => throw FormatException('VRZ GLB: $message');
   if (bytes.length < 28) fail('truncated header');
@@ -131,23 +132,23 @@ VrzGlbStats inspectVrzGlbStats(
       (asset['minVersion'] != null && asset['minVersion'] != '2.0')) {
     fail('unsupported glTF asset version');
   }
-  final allowTextures = allowEmbeddedBaseColorTextures || allowV2Graphics;
+  final allowTextures = allowEmbeddedBaseColorTextures || allowExtendedGraphics;
   _checkTree(
     json,
     allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
-    allowV2Graphics: allowV2Graphics,
+    allowExtendedGraphics: allowExtendedGraphics,
   );
   for (final key in [
     if (!allowTextures) ...['images', 'textures', 'samplers'],
-    if (!allowV2Graphics) ...['animations', 'skins'],
+    if (!allowExtendedGraphics) ...['animations', 'skins'],
     'cameras',
   ]) {
     if (_list(json[key], key).isNotEmpty) {
       fail('$key are not supported in version 1');
     }
   }
-  final allowedExtensions = allowV2Graphics
-      ? VrzGlbV2Limits.allowedExtensions
+  final allowedExtensions = allowExtendedGraphics
+      ? VrzGlbExtendedLimits.allowedExtensions
       : const {'KHR_materials_unlit'};
   for (final key in ['extensionsUsed', 'extensionsRequired']) {
     final extensions = _list(json[key], key);
@@ -160,7 +161,7 @@ VrzGlbStats inspectVrzGlbStats(
   }
   final buffers = _list(json['buffers'], 'buffers');
   if (buffers.isEmpty ||
-      (!allowV2Graphics && buffers.length != 1) ||
+      (!allowExtendedGraphics && buffers.length != 1) ||
       buffers.length > 8) {
     fail('exactly one embedded buffer is required');
   }
@@ -193,7 +194,7 @@ VrzGlbStats inspectVrzGlbStats(
   for (final value in views) {
     final view = _map(value, 'bufferView');
     final ext = view['extensions'];
-    final meshopt = allowV2Graphics && ext is Map
+    final meshopt = allowExtendedGraphics && ext is Map
         ? ext['EXT_meshopt_compression']
         : null;
     final stride = view['byteStride'] == null
@@ -228,7 +229,7 @@ VrzGlbStats inspectVrzGlbStats(
         fail('invalid EXT_meshopt_compression range');
       }
       totalMeshoptDecoded += declaredLength;
-      if (totalMeshoptDecoded > VrzGlbV2Limits.maxMeshoptDecodedBytes) {
+      if (totalMeshoptDecoded > VrzGlbExtendedLimits.maxMeshoptDecodedBytes) {
         fail('meshopt decoded byte budget exceeded');
       }
       viewInfo.add((
@@ -258,14 +259,14 @@ VrzGlbStats inspectVrzGlbStats(
   if (allowTextures) {
     final images = _list(json['images'], 'images');
     final samplers = _list(json['samplers'], 'samplers');
-    final maxImages = allowV2Graphics
-        ? VrzGlbV2Limits.maxImages
+    final maxImages = allowExtendedGraphics
+        ? VrzGlbExtendedLimits.maxImages
         : VrzGlbTextureLimits.maxImages;
-    final maxDim = allowV2Graphics
-        ? VrzGlbV2Limits.maxDimension
+    final maxDim = allowExtendedGraphics
+        ? VrzGlbExtendedLimits.maxDimension
         : VrzGlbTextureLimits.maxDimension;
-    final maxVram = allowV2Graphics
-        ? VrzGlbV2Limits.maxEstimatedVramBytes
+    final maxVram = allowExtendedGraphics
+        ? VrzGlbExtendedLimits.maxEstimatedVramBytes
         : VrzGlbTextureLimits.maxDecodedBytes;
     if (images.length > maxImages ||
         textures.length > maxImages ||
@@ -302,17 +303,17 @@ VrzGlbStats inspectVrzGlbStats(
           fail('embedded PNG exceeds dimension budget');
         }
         estimatedBytes = size.width * size.height * 4;
-      } else if (allowV2Graphics && mime == 'image/ktx2') {
+      } else if (allowExtendedGraphics && mime == 'image/ktx2') {
         final size = _validateKtx2Bytes(imgBytes, maxDim);
         // Transcoded GPU block formats (ASTC/ETC2/BC7) + mip chain average
         // <= 10.67 bits/pixel (~1/3 of uncompressed RGBA8).
         estimatedBytes = (size.width * size.height * 4 + 2) ~/ 3;
-      } else if (allowV2Graphics && mime == 'image/jpeg') {
+      } else if (allowExtendedGraphics && mime == 'image/jpeg') {
         final size = _validateJpegBytes(imgBytes, maxDim);
         estimatedBytes = size.width * size.height * 4;
       } else {
         fail(
-          allowV2Graphics
+          allowExtendedGraphics
               ? 'embedded images must declare image/png, image/jpeg or image/ktx2'
               : 'embedded images must declare image/png',
         );
@@ -326,7 +327,7 @@ VrzGlbStats inspectVrzGlbStats(
     for (final value in textures) {
       final texture = _map(value, 'texture');
       int? sourceIndex;
-      if (allowV2Graphics && texture['extensions'] is Map) {
+      if (allowExtendedGraphics && texture['extensions'] is Map) {
         final texExt = _map(texture['extensions'], 'texture.extensions');
         if (texExt.containsKey('KHR_texture_basisu')) {
           final basisu = _map(
@@ -412,7 +413,7 @@ VrzGlbStats inspectVrzGlbStats(
       'VEC2' => 2,
       'VEC3' => 3,
       'VEC4' => 4,
-      'MAT4' when allowV2Graphics => 16,
+      'MAT4' when allowExtendedGraphics => 16,
       _ => 0,
     };
     final normalized = accessor['normalized'] ?? false;
@@ -425,7 +426,7 @@ VrzGlbStats inspectVrzGlbStats(
       fail('unsupported accessor shape, component or count');
     }
     totalComponents += count * components;
-    if (totalComponents > (allowV2Graphics ? 8000000 : 4000000)) {
+    if (totalComponents > (allowExtendedGraphics ? 8000000 : 4000000)) {
       fail('accessor component budget exceeded');
     }
     final local = _integer(accessor['byteOffset'] ?? 0, 'accessor.byteOffset');
@@ -490,7 +491,7 @@ VrzGlbStats inspectVrzGlbStats(
     final texInfo = _map(rawInfo, label);
     _index(texInfo['index'], textures.length, '$label.index');
     final uv = _integer(texInfo['texCoord'] ?? 0, '$label.texCoord');
-    if (!allowV2Graphics && uv != 0) {
+    if (!allowExtendedGraphics && uv != 0) {
       fail('embedded $label must use TEXCOORD_0');
     }
     if (uv != 0 && uv != 1) {
@@ -528,7 +529,7 @@ VrzGlbStats inspectVrzGlbStats(
       if (pbr.containsKey('baseColorTexture')) {
         checkTextureInfo(pbr['baseColorTexture'], 'baseColorTexture', matIdx);
       }
-      if (allowV2Graphics && pbr.containsKey('metallicRoughnessTexture')) {
+      if (allowExtendedGraphics && pbr.containsKey('metallicRoughnessTexture')) {
         checkTextureInfo(
           pbr['metallicRoughnessTexture'],
           'metallicRoughnessTexture',
@@ -536,7 +537,7 @@ VrzGlbStats inspectVrzGlbStats(
         );
       }
     }
-    if (allowV2Graphics) {
+    if (allowExtendedGraphics) {
       if (material.containsKey('normalTexture')) {
         checkTextureInfo(
           material['normalTexture'],
@@ -594,9 +595,9 @@ VrzGlbStats inspectVrzGlbStats(
   for (final value in meshes) {
     final mesh = _map(value, 'mesh');
     if (mesh.containsKey('weights')) {
-      if (!allowV2Graphics) fail('morph weights are unsupported');
+      if (!allowExtendedGraphics) fail('morph weights are unsupported');
       final weights = _list(mesh['weights'], 'mesh.weights');
-      if (weights.isEmpty || weights.length > VrzGlbV2Limits.maxMorphTargets) {
+      if (weights.isEmpty || weights.length > VrzGlbExtendedLimits.maxMorphTargets) {
         fail('morph weights budget exceeded');
       }
       _numbers(weights, weights.length, 100);
@@ -609,11 +610,11 @@ VrzGlbStats inspectVrzGlbStats(
       if (++primitiveCount > 2048) fail('primitive budget exceeded');
       final primitive = _map(value, 'primitive');
       if ((primitive['mode'] ?? 4) != 4 ||
-          (!allowV2Graphics && primitive.containsKey('targets'))) {
+          (!allowExtendedGraphics && primitive.containsKey('targets'))) {
         fail('only triangle meshes without morph targets are supported');
       }
       final attributes = _map(primitive['attributes'], 'attributes');
-      final allowed = allowV2Graphics
+      final allowed = allowExtendedGraphics
           ? const {
               'POSITION',
               'NORMAL',
@@ -631,16 +632,16 @@ VrzGlbStats inspectVrzGlbStats(
       final position =
           info[_index(attributes['POSITION'], info.length, 'POSITION')];
       if (position.type != 'VEC3' ||
-          (!allowV2Graphics && position.component != 5126) ||
-          (allowV2Graphics &&
+          (!allowExtendedGraphics && position.component != 5126) ||
+          (allowExtendedGraphics &&
               !const [5120, 5121, 5122, 5123, 5126].contains(
                 position.component,
               ))) {
         fail('POSITION must be float VEC3');
       }
-      if (allowV2Graphics && primitive.containsKey('targets')) {
+      if (allowExtendedGraphics && primitive.containsKey('targets')) {
         final targets = _list(primitive['targets'], 'primitive.targets');
-        if (targets.isEmpty || targets.length > VrzGlbV2Limits.maxMorphTargets) {
+        if (targets.isEmpty || targets.length > VrzGlbExtendedLimits.maxMorphTargets) {
           fail('morph target budget exceeded');
         }
         for (final rawTarget in targets) {
@@ -670,7 +671,7 @@ VrzGlbStats inspectVrzGlbStats(
         if (!expected.contains(attribute.type)) {
           fail('invalid vertex attribute shape');
         }
-        if (!allowV2Graphics &&
+        if (!allowExtendedGraphics &&
             (entry.key == 'NORMAL' || entry.key == 'TANGENT') &&
             attribute.component != 5126) {
           fail('normals and tangents must use floats');
@@ -738,7 +739,7 @@ VrzGlbStats inspectVrzGlbStats(
   final nodes = _list(json['nodes'], 'nodes');
   if (nodes.isEmpty || nodes.length > 2048) fail('node budget exceeded');
   final skins = _list(json['skins'], 'skins');
-  if (allowV2Graphics && skins.length > VrzGlbV2Limits.maxSkins) {
+  if (allowExtendedGraphics && skins.length > VrzGlbExtendedLimits.maxSkins) {
     fail('skin budget exceeded');
   }
   for (final value in skins) {
@@ -768,7 +769,7 @@ VrzGlbStats inspectVrzGlbStats(
   }
 
   final animations = _list(json['animations'], 'animations');
-  if (allowV2Graphics && animations.length > VrzGlbV2Limits.maxAnimations) {
+  if (allowExtendedGraphics && animations.length > VrzGlbExtendedLimits.maxAnimations) {
     fail('animation budget exceeded');
   }
   for (final value in animations) {
@@ -815,16 +816,16 @@ VrzGlbStats inspectVrzGlbStats(
   for (final value in nodes) {
     final node = _map(value, 'node');
     if (node.containsKey('camera') ||
-        (!allowV2Graphics &&
+        (!allowExtendedGraphics &&
             (node.containsKey('skin') || node.containsKey('weights')))) {
       fail('unsupported node feature');
     }
-    if (allowV2Graphics && node.containsKey('skin')) {
+    if (allowExtendedGraphics && node.containsKey('skin')) {
       _index(node['skin'], skins.length, 'node.skin');
     }
-    if (allowV2Graphics && node.containsKey('weights')) {
+    if (allowExtendedGraphics && node.containsKey('weights')) {
       final w = _list(node['weights'], 'node.weights');
-      if (w.isEmpty || w.length > VrzGlbV2Limits.maxMorphTargets) {
+      if (w.isEmpty || w.length > VrzGlbExtendedLimits.maxMorphTargets) {
         fail('node weights budget exceeded');
       }
       _numbers(w, w.length, 100);
@@ -872,12 +873,12 @@ VrzGlbStats inspectVrzGlbStats(
   }
   if (submittedTriangles == 0 ||
       submittedTriangles > maxSubmittedTriangles ||
-      submittedVertices > (allowV2Graphics ? 500000 : 250000)) {
+      submittedVertices > (allowExtendedGraphics ? 500000 : 250000)) {
     fail('submitted geometry budget exceeded');
   }
   final visited = <int>{};
   void visit(int index, vm.Matrix4 parent, int depth) {
-    if (depth > (allowV2Graphics ? 64 : 32) || !visited.add(index)) {
+    if (depth > (allowExtendedGraphics ? 64 : 32) || !visited.add(index)) {
       fail('cyclic or excessively deep node graph');
     }
     final world = vm.Matrix4.copy(parent)..multiply(matrices[index]);
@@ -1033,7 +1034,7 @@ void _checkNumbers(Object? value) {
 void _checkTree(
   Object? value, {
   required bool allowEmbeddedBaseColorTextures,
-  required bool allowV2Graphics,
+  required bool allowExtendedGraphics,
 }) {
   if (value is Map) {
     for (final entry in value.entries) {
@@ -1046,7 +1047,7 @@ void _checkTree(
           'VRZ GLB must not reference external resources or textures.',
         );
       }
-      if (!allowV2Graphics &&
+      if (!allowExtendedGraphics &&
           key.endsWith('Texture') &&
           !(allowEmbeddedBaseColorTextures && key == 'baseColorTexture')) {
         throw const FormatException(
@@ -1055,14 +1056,14 @@ void _checkTree(
       }
       if (key == 'extensions') {
         final extensions = _map(entry.value, 'extensions');
-        if (!allowV2Graphics) {
+        if (!allowExtendedGraphics) {
           if (extensions.keys.any((ext) => ext != 'KHR_materials_unlit') ||
               extensions.values.any((item) => item is! Map || item.isNotEmpty)) {
             throw const FormatException('Unsupported GLB extension.');
           }
         } else {
           if (extensions.keys.any(
-                (ext) => !VrzGlbV2Limits.allowedExtensions.contains(ext),
+                (ext) => !VrzGlbExtendedLimits.allowedExtensions.contains(ext),
               ) ||
               extensions.values.any((item) => item is! Map)) {
             throw const FormatException('Unsupported GLB extension.');
@@ -1072,7 +1073,7 @@ void _checkTree(
       _checkTree(
         entry.value,
         allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
-        allowV2Graphics: allowV2Graphics,
+        allowExtendedGraphics: allowExtendedGraphics,
       );
     }
   } else if (value is List) {
@@ -1080,7 +1081,7 @@ void _checkTree(
       _checkTree(
         item,
         allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
-        allowV2Graphics: allowV2Graphics,
+        allowExtendedGraphics: allowExtendedGraphics,
       );
     }
   }

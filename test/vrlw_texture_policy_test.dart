@@ -108,7 +108,7 @@ void main() {
   );
 
   test(
-    'v2 worlds admit valid 2D texture.ktx2 and account compressed VRAM',
+    'worlds.v1 with worlds.ktx2 capability admits valid 2D texture.ktx2 and accounts compressed VRAM',
     () async {
       final rgba = Uint8List(16 * 16 * 4)..fillRange(0, 16 * 16 * 4, 220);
       final validKtx2 = VrKtx2Codec.encodeMipChainToKtx2(<VrRawMipLevel>[
@@ -125,21 +125,24 @@ void main() {
           };
         },
       );
-      fixture.manifest['formatVersion'] = 2;
-      fixture.manifest['runtime'] = VrlzWorldManifest.runtimeV2;
+      fixture.manifest['formatVersion'] = 1;
+      fixture.manifest['runtime'] = VrlzWorldManifest.runtime;
       fixture.manifest['capabilities'] = const <String>[
         'worlds.local',
         'worlds.ktx2',
       ];
-      final v2Bundle = VrlzWorldBundle.decode(
+      final ktx2Bundle = VrlzWorldBundle.decode(
         VrlzWorldBundle.encode(fixture.manifest, fixture.files),
       );
-      final metrics = v2Bundle.inspectBudgetMetrics();
+      expect(ktx2Bundle.manifest.formatVersion, 1);
+      expect(ktx2Bundle.manifest.runtimeId, VrlzWorldManifest.runtime);
+      final metrics = ktx2Bundle.inspectBudgetMetrics();
       expect(metrics.peakVramBytes, greaterThan(0));
 
-      final prepared = await v2Bundle.openWorld('garden');
+      final prepared = await ktx2Bundle.openWorld('garden');
       addTearDown(prepared.reader.close);
-      expect(prepared.isV2, isTrue);
+      expect(prepared.hasExtendedProfile, isTrue);
+      expect(prepared.allowsKtx2Textures, isTrue);
       expect(prepared.resources['floor.color'], validKtx2);
 
       final sky = await loadVrlwAuthoredSky<String>(
@@ -154,7 +157,7 @@ void main() {
   );
 
   test(
-    'v2 worlds reject unsupported KTX2 formats or mismatched dimensions',
+    'worlds.v1 with worlds.ktx2 rejects unsupported KTX2 formats or mismatched dimensions',
     () async {
       final rgba = Uint8List(16 * 16 * 4)..fillRange(0, 16 * 16 * 4, 200);
       final validKtx2 = VrKtx2Codec.encodeMipChainToKtx2(<VrRawMipLevel>[
@@ -169,7 +172,7 @@ void main() {
         throwsFormatException,
       );
 
-      // 80-byte stub KTX2 with vkFormat=0 and empty DFD is rejected in v2.
+      // 80-byte stub KTX2 with vkFormat=0 and empty DFD is rejected.
       final stubBytes = Uint8List(80)
         ..setRange(0, 12, VrKtx2Codec.ktx2Magic);
       ByteData.sublistView(stubBytes)
@@ -186,16 +189,16 @@ void main() {
           };
         },
       );
-      fixture.manifest['formatVersion'] = 2;
-      fixture.manifest['runtime'] = VrlzWorldManifest.runtimeV2;
+      fixture.manifest['formatVersion'] = 1;
+      fixture.manifest['runtime'] = VrlzWorldManifest.runtime;
       fixture.manifest['capabilities'] = const <String>[
         'worlds.local',
         'worlds.ktx2',
       ];
-      final v2Bundle = VrlzWorldBundle.decode(
+      final ktx2Bundle = VrlzWorldBundle.decode(
         VrlzWorldBundle.encode(fixture.manifest, fixture.files),
       );
-      await expectLater(v2Bundle.openWorld('garden'), throwsFormatException);
+      await expectLater(ktx2Bundle.openWorld('garden'), throwsFormatException);
     },
   );
 }

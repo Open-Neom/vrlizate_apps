@@ -211,8 +211,8 @@ class _VrzSceneViewerState extends State<VrzSceneViewer> {
       scene.autoExposure.enabled = false;
       scene.postProcess.bloom.enabled = false;
 
-      final maxTex = widget.bundle.manifest.isV2
-          ? VrzGlbV2Limits.maxDimension
+      final maxTex = widget.bundle.manifest.hasExtendedProfile
+          ? VrzGlbExtendedLimits.maxDimension
           : VrzGlbTextureLimits.maxDimension;
       final model = await fs.Node.fromGlbBytes(
         widget.bundle.sceneBytes,

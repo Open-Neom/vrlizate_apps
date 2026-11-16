@@ -8,7 +8,7 @@ import 'vrz_glb.dart';
 import 'vrz_manifest.dart';
 import 'vrz_zip.dart';
 
-/// Validated, immutable data for an existing scene runtime, never executable code.
+/// Validated, immutable data for an existing v1 scene runtime, never executable code.
 final class VrzBundle {
   VrzBundle._(this.manifest, Uint8List scene, this.glbStats, this.source)
     : _scene = Uint8List.fromList(scene);
@@ -31,51 +31,32 @@ final class VrzBundle {
         'scene.glb does not match the manifest SHA-256.',
       );
     }
-    final stats = inspectVrzGlbStats(scene, allowV2Graphics: manifest.isV2);
+    final stats = inspectVrzGlbStats(
+      scene,
+      allowExtendedGraphics: manifest.hasExtendedProfile,
+    );
     return VrzBundle._(manifest, scene, stats, source);
   }
 
-  /// Creates a STORE-only v1 bundle and validates it using the same reader.
+  /// Creates a STORE-only `vrlizate.scene.v1` bundle (`formatVersion: 1`) and
+  /// validates it using the same reader.
   static Uint8List encode({
     required Uint8List sceneBytes,
     required String id,
     required String title,
     String description = '',
-    List<double> cameraPosition = const [0, 1.6, 6],
-    List<double> cameraTarget = const [0, 1, -6],
-  }) => _encodeWithManifest(
-    sceneBytes: sceneBytes,
-    manifestJson: {
-      'formatVersion': 1,
-      'id': id,
-      'title': title,
-      'description': description,
-      'runtime': VrzManifest.supportedRuntime,
-      'entrypoint': 'scene.glb',
-      'capabilities': [VrzManifest.supportedCapability],
-      'sha256': {'scene.glb': sha256.convert(sceneBytes).toString()},
-      'camera': {'position': cameraPosition, 'target': cameraTarget},
-    },
-  );
-
-  /// Creates a STORE-only v2 PBR/KTX2/meshopt/animation scene bundle.
-  static Uint8List encodeV2({
-    required Uint8List sceneBytes,
-    required String id,
-    required String title,
-    String description = '',
-    List<String> capabilities = const ['scene.gltf2', 'scene.pbr'],
+    List<String> capabilities = const [VrzManifest.supportedCapability],
     List<double> cameraPosition = const [0, 1.6, 6],
     List<double> cameraTarget = const [0, 1, -6],
     Map<String, Object?> extensions = const {},
   }) => _encodeWithManifest(
     sceneBytes: sceneBytes,
     manifestJson: {
-      'formatVersion': 2,
+      'formatVersion': VrzManifest.supportedFormatVersion,
       'id': id,
       'title': title,
       'description': description,
-      'runtime': VrzManifest.supportedRuntimeV2,
+      'runtime': VrzManifest.supportedRuntime,
       'entrypoint': 'scene.glb',
       'capabilities': capabilities,
       'sha256': {'scene.glb': sha256.convert(sceneBytes).toString()},

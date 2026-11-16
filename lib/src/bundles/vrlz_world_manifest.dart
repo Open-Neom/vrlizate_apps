@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-/// Closed data contract for the portable-worlds v1 and v2 runtimes.
+/// Closed data contract for the portable-worlds `vrlizate.worlds.v1` runtime.
 final class VrlzWorldManifest {
   VrlzWorldManifest._(
     this.formatVersion,
@@ -16,9 +16,9 @@ final class VrlzWorldManifest {
     this.extensions,
   );
 
+  static const supportedFormatVersion = 1;
   static const runtime = 'vrlizate.worlds.v1';
-  static const runtimeV2 = 'vrlizate.worlds.v2';
-  static const Set<String> supportedCapabilitiesV2 = {
+  static const Set<String> supportedCapabilities = {
     'worlds.local',
     'worlds.pbr',
     'worlds.ktx2',
@@ -41,7 +41,13 @@ final class VrlzWorldManifest {
   final List<VrlzWorldPortal> portals;
   final Map<String, Object?> extensions;
 
-  bool get isV2 => formatVersion == 2 && runtimeId == runtimeV2;
+  /// Whether this `vrlizate.worlds.v1` manifest opts into extended PBR, KTX2,
+  /// physics, interactivity, or shared-asset budgets beyond base `worlds.local`.
+  bool get hasExtendedProfile =>
+      capabilities.length > 1 || extensions.isNotEmpty;
+
+  /// Whether 2D `texture.ktx2` resources are admitted by this world manifest.
+  bool get allowsKtx2Textures => capabilities.contains('worlds.ktx2');
 
   VrlzWorldEntry world(String alias) => worlds.firstWhere(
     (world) => world.alias == alias,
@@ -51,9 +57,9 @@ final class VrlzWorldManifest {
   factory VrlzWorldManifest.fromJson(Map<String, dynamic> json) {
     final version = json['formatVersion'];
     final runtimeValue = json['runtime'];
-    final isV1 = version == 1 && runtimeValue == runtime;
-    final isV2 = version == 2 && runtimeValue == runtimeV2;
-    if (version is! int || (!isV1 && !isV2)) {
+    if (version is! int ||
+        version != supportedFormatVersion ||
+        runtimeValue != runtime) {
       _fail('Unsupported worlds runtime or capabilities.');
     }
     const requiredKeys = {
@@ -68,41 +74,30 @@ final class VrlzWorldManifest {
       'worlds',
       'portals',
     };
-    if (isV1) {
-      _keys(json, requiredKeys);
-    } else {
-      const allowedV2 = {...requiredKeys, 'extensions'};
-      if (!requiredKeys.every(json.containsKey) ||
-          !json.keys.every(allowedV2.contains)) {
-        _fail('Missing or unsupported manifest field.');
-      }
+    const allowedKeys = {...requiredKeys, 'extensions'};
+    if (!requiredKeys.every(json.containsKey) ||
+        !json.keys.every(allowedKeys.contains)) {
+      _fail('Missing or unsupported manifest field.');
     }
     final rawCaps = json['capabilities'];
     if (rawCaps is! List || rawCaps.isEmpty) {
       _fail('Unsupported worlds runtime or capabilities.');
     }
     final parsedCaps = <String>[];
-    if (isV1) {
-      if (rawCaps.length != 1 || rawCaps.single != 'worlds.local') {
+    final seen = <String>{};
+    for (final cap in rawCaps) {
+      if (cap is! String ||
+          !supportedCapabilities.contains(cap) ||
+          !seen.add(cap)) {
         _fail('Unsupported worlds runtime or capabilities.');
       }
-      parsedCaps.add('worlds.local');
-    } else {
-      final seen = <String>{};
-      for (final cap in rawCaps) {
-        if (cap is! String ||
-            !supportedCapabilitiesV2.contains(cap) ||
-            !seen.add(cap)) {
-          _fail('Unsupported worlds runtime or capabilities.');
-        }
-        parsedCaps.add(cap);
-      }
-      if (!seen.contains('worlds.local')) {
-        _fail('VRLZ worlds v2 requires worlds.local capability.');
-      }
+      parsedCaps.add(cap);
+    }
+    if (!seen.contains('worlds.local')) {
+      _fail('VRLZ worlds v1 requires worlds.local capability.');
     }
     var extensions = const <String, Object?>{};
-    if (isV2 && json.containsKey('extensions')) {
+    if (json.containsKey('extensions')) {
       final rawExt = json['extensions'];
       if (rawExt is! Map<String, dynamic> || rawExt.length > 16) {
         _fail('Invalid worlds extensions map.');
@@ -177,7 +172,7 @@ final class VrlzWorldManifest {
     'revision': revision,
     'worlds': worlds.map((world) => world.toJson()).toList(),
     'portals': portals.map((portal) => portal.toJson()).toList(),
-    if (isV2 && extensions.isNotEmpty) 'extensions': extensions,
+    if (extensions.isNotEmpty) 'extensions': extensions,
   };
 }
 

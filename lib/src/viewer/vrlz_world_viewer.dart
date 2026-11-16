@@ -389,7 +389,8 @@ class _WorldPlayerState extends State<_WorldPlayer>
         prepared.resources,
         isCurrent: current,
         debugForceHighestLod: !widget.distanceLod,
-        isV2: prepared.isV2,
+        hasExtendedProfile: prepared.hasExtendedProfile,
+        allowKtx2Textures: prepared.allowsKtx2Textures,
         qualityTier: widget.quality?.tier,
         activity: _activities.putIfAbsent(
           prepared.reader.index.id,

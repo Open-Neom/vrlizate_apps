@@ -30,15 +30,15 @@ final class VrlzWorldBundle {
   static const maxStreamArchiveBytes = 256 * 1024 * 1024;
   static const maxWorldChunks = 64;
   static const maxWorldResources = 8;
-  static const maxWorldResourcesV2 = 64;
-  static const maxWorldUnpackedBytesV2 = 32 * 1024 * 1024;
+  static const maxExtendedWorldResources = 64;
+  static const maxExtendedWorldUnpackedBytes = 32 * 1024 * 1024;
   // A separate, small PCM budget does not increase the model/texture budget.
   static const maxWorldAudioResources = 1;
-  static const maxWorldAudioResourcesV2 = 8;
+  static const maxExtendedWorldAudioResources = 8;
   static const maxWorldBindings = 16;
-  static const maxWorldBindingsV2 = 64;
+  static const maxExtendedWorldBindings = 64;
   static const maxModelTriangles = 20000;
-  static const maxModelTrianglesV2 = 60000;
+  static const maxExtendedModelTriangles = 60000;
   static const maxCellSizeMeters = 128;
   final VrlzWorldManifest manifest;
   final String manifestSha256;
@@ -65,9 +65,10 @@ final class VrlzWorldBundle {
     return peak;
   }
 
-  /// Peak triangle ceiling implied by the active world runtime version.
-  int get worldModelTriangleBudget =>
-      manifest.isV2 ? maxModelTrianglesV2 : maxModelTriangles;
+  /// Peak triangle ceiling implied by the active `vrlizate.worlds.v1` profile.
+  int get worldModelTriangleBudget => manifest.hasExtendedProfile
+      ? maxExtendedModelTriangles
+      : maxModelTriangles;
 
   static bool isWorldFile(String name) =>
       RegExp(r'^world_[a-z][a-z0-9_-]{0,31}\.vrlw$').hasMatch(name);
@@ -86,7 +87,7 @@ final class VrlzWorldBundle {
   static VrlzWorldBundle fromRawVrlw(
     Uint8List bytes, {
     Uri? source,
-    bool allowV2 = false,
+    bool allowExtendedProfile = false,
   }) {
     if (bytes.length > maxBytes || bytes.length < VrlwBundleCodec.headerSize) {
       throw const FormatException('VRLW exceeds 32 MiB or is truncated.');
@@ -101,18 +102,18 @@ final class VrlzWorldBundle {
       header,
       bytes.sublist(VrlwBundleCodec.headerSize, header.payloadOffset),
     );
-    final fitsV1 =
-        _withinResourceBudget(index, isV2: false) &&
+    final fitsBase =
+        _withinResourceBudget(index, extendedProfile: false) &&
         index.prototypeBindings.length <= maxWorldBindings;
-    final fitsV2 =
-        allowV2 &&
-        _withinResourceBudget(index, isV2: true) &&
-        index.prototypeBindings.length <= maxWorldBindingsV2;
+    final fitsExtended =
+        allowExtendedProfile &&
+        _withinResourceBudget(index, extendedProfile: true) &&
+        index.prototypeBindings.length <= maxExtendedWorldBindings;
     if (index.origin['type'] != 'local' ||
         index.cellSizeMeters > maxCellSizeMeters ||
         index.chunks.length > maxWorldChunks ||
         index.chunks.isEmpty ||
-        (!fitsV1 && !fitsV2) ||
+        (!fitsBase && !fitsExtended) ||
         index.resources.isEmpty ||
         index.prototypeBindings.isEmpty ||
         index.prototypeBindings.map((b) => b.prototypeId).toSet().length !=
@@ -141,18 +142,22 @@ final class VrlzWorldBundle {
     final safeRev = rawRev.isEmpty
         ? '1'
         : (rawRev.length > 64 ? rawRev.substring(0, 64) : rawRev);
-    final promoteToV2 = !fitsV1;
+    final hasKtx2 = index.resources.any((r) => r.type == 'texture.ktx2');
+    final useExtendedCaps = !fitsBase || hasKtx2;
     final manifest = VrlzWorldManifest.fromJson(<String, dynamic>{
-      'formatVersion': promoteToV2 ? 2 : 1,
+      'formatVersion': VrlzWorldManifest.supportedFormatVersion,
       'id': index.id,
       'title': safeTitle,
       'description': 'Mundo portatil .vrlw',
-      'runtime': promoteToV2
-          ? VrlzWorldManifest.runtimeV2
-          : VrlzWorldManifest.runtime,
+      'runtime': VrlzWorldManifest.runtime,
       'entrypoint': 'main',
-      'capabilities': promoteToV2
-          ? ['worlds.local', 'worlds.pbr', 'worlds.physics']
+      'capabilities': useExtendedCaps
+          ? [
+              'worlds.local',
+              'worlds.pbr',
+              if (hasKtx2) 'worlds.ktx2',
+              'worlds.physics',
+            ]
           : ['worlds.local'],
       'revision': safeRev,
       'worlds': [
@@ -190,8 +195,8 @@ final class VrlzWorldBundle {
     );
     final metadata = files['manifest.json']!;
     final manifest = VrlzWorldManifest.fromJson(decodeVrzJson(metadata));
-    final isV2 = manifest.isV2;
-    final bindingLimit = isV2 ? maxWorldBindingsV2 : maxWorldBindings;
+    final extended = manifest.hasExtendedProfile;
+    final bindingLimit = extended ? maxExtendedWorldBindings : maxWorldBindings;
     if (files.length != manifest.worlds.length + 1 ||
         !manifest.worlds.every((world) => files.containsKey(world.file))) {
       throw const FormatException(
@@ -222,7 +227,7 @@ final class VrlzWorldBundle {
           index.cellSizeMeters > maxCellSizeMeters ||
           index.chunks.length > maxWorldChunks ||
           index.chunks.isEmpty ||
-          !_withinResourceBudget(index, isV2: isV2) ||
+          !_withinResourceBudget(index, extendedProfile: extended) ||
           index.resources.isEmpty ||
           index.prototypeBindings.length > bindingLimit ||
           index.prototypeBindings.isEmpty ||
@@ -335,7 +340,7 @@ final class VrlzWorldBundle {
     return archive.readEntryBytes(world.file);
   }
 
-  /// Opens a multi-world `.vrlz` v1/v2 archive directly from an Android SAF
+  /// Opens a multi-world `.vrlz` v1 archive directly from an Android SAF
   /// `content://` URI via JNI (`ContentResolver.openFileDescriptor().detachFd()`)
   /// without copying or unpacking `.vrlw` payloads into RAM or app cache.
   static Future<VrlzWorldBundle> openAndroidSafUri(
@@ -358,7 +363,7 @@ final class VrlzWorldBundle {
     );
   }
 
-  /// Opens a multi-world `.vrlz` v1/v2 archive over [randomSource] (such as a
+  /// Opens a multi-world `.vrlz` v1 archive over [randomSource] (such as a
   /// local file or Android SAF `fd:<n>/<name>` descriptor) without unpacking or
   /// loading `.vrlw` payloads into RAM: only `manifest.json` and each world's
   /// small `.vrlw` header+index slice are read up front.
@@ -406,8 +411,8 @@ final class VrlzWorldBundle {
     required VrlzWorldManifest manifest,
     Uri? source,
   }) async {
-    final isV2 = manifest.isV2;
-    final bindingLimit = isV2 ? maxWorldBindingsV2 : maxWorldBindings;
+    final extended = manifest.hasExtendedProfile;
+    final bindingLimit = extended ? maxExtendedWorldBindings : maxWorldBindings;
     if (archive.entries.length != manifest.worlds.length + 1 ||
         !manifest.worlds.every((w) => archive.containsFile(w.file) && isWorldFile(w.file))) {
       throw const FormatException(
@@ -448,7 +453,7 @@ final class VrlzWorldBundle {
           index.cellSizeMeters > maxCellSizeMeters ||
           index.chunks.length > maxWorldChunks ||
           index.chunks.isEmpty ||
-          !_withinResourceBudget(index, isV2: isV2) ||
+          !_withinResourceBudget(index, extendedProfile: extended) ||
           index.resources.isEmpty ||
           index.prototypeBindings.length > bindingLimit ||
           index.prototypeBindings.isEmpty ||
@@ -536,8 +541,9 @@ final class VrlzWorldBundle {
   /// Validates all embedded GLB models across all worlds and returns the peak
   /// per-world VRAM and model triangle count for creator budget admission.
   ({int peakVramBytes, int maxModelTriangles}) inspectBudgetMetrics() {
-    final isV2 = manifest.isV2;
-    final triCap = isV2 ? maxModelTrianglesV2 : maxModelTriangles;
+    final extended = manifest.hasExtendedProfile;
+    final allowKtx2 = manifest.allowsKtx2Textures;
+    final triCap = extended ? maxExtendedModelTriangles : maxModelTriangles;
     var peakWorldVram = 0;
     var peakTriangles = 0;
     for (final world in manifest.worlds) {
@@ -546,7 +552,7 @@ final class VrlzWorldBundle {
       for (final resource in index.resources) {
         VrlwTexturePolicy.validateDecoder(
           resource.type,
-          allowKtx2Textures: isV2,
+          allowKtx2Textures: allowKtx2,
         );
       }
       var worldVram = 0;
@@ -563,7 +569,7 @@ final class VrlzWorldBundle {
             decoded,
             maxSubmittedTriangles: triCap,
             allowEmbeddedBaseColorTextures: true,
-            allowV2Graphics: isV2,
+            allowExtendedGraphics: extended,
           );
           worldVram += stats.estimatedVramBytes + decoded.length;
           peakTriangles = math.max(peakTriangles, stats.submittedTriangles);
@@ -583,7 +589,7 @@ final class VrlzWorldBundle {
         }
         resources[resource.id] = decoded;
       }
-      VrlwLodProfile.validate(index, resources, allowMovingLod: isV2);
+      VrlwLodProfile.validate(index, resources, allowMovingLod: extended);
       VrlwMotionProfile.validate(index, resources);
       peakWorldVram = math.max(peakWorldVram, worldVram);
     }
@@ -595,7 +601,7 @@ final class VrlzWorldBundle {
 
   static bool _withinResourceBudget(
     VrlwBundleIndex index, {
-    required bool isV2,
+    required bool extendedProfile,
   }) {
     final audio = index.resources
         .where((r) => r.type.startsWith('audio.'))
@@ -603,14 +609,18 @@ final class VrlzWorldBundle {
     final nonAudio = index.resources
         .where((r) => !r.type.startsWith('audio.'))
         .toList();
-    final maxRes = isV2 ? maxWorldResourcesV2 : maxWorldResources;
-    final maxAudio = isV2 ? maxWorldAudioResourcesV2 : maxWorldAudioResources;
+    final maxRes = extendedProfile
+        ? maxExtendedWorldResources
+        : maxWorldResources;
+    final maxAudio = extendedProfile
+        ? maxExtendedWorldAudioResources
+        : maxWorldAudioResources;
     var unpackedNonAudio = 0;
     for (final resource in nonAudio) {
       unpackedNonAudio += resource.unpackedBytes;
     }
     return nonAudio.length <= maxRes &&
-        (!isV2 || unpackedNonAudio <= maxWorldUnpackedBytesV2) &&
+        (!extendedProfile || unpackedNonAudio <= maxExtendedWorldUnpackedBytes) &&
         audio.length <= maxAudio &&
         audio.every(
           (r) =>
@@ -622,13 +632,14 @@ final class VrlzWorldBundle {
   /// The full model profile is validated before any prototype is registered or
   /// any GPU resource is created. Region expansion remains demand-driven.
   Future<VrlzPreparedWorld> openWorld(String alias) async {
-    final isV2 = manifest.isV2;
+    final extended = manifest.hasExtendedProfile;
+    final allowKtx2 = manifest.allowsKtx2Textures;
     final world = manifest.world(alias);
     final index = _indices[alias]!;
     for (final resource in index.resources) {
       VrlwTexturePolicy.validateDecoder(
         resource.type,
-        allowKtx2Textures: isV2,
+        allowKtx2Textures: allowKtx2,
       );
     }
 
@@ -652,10 +663,11 @@ final class VrlzWorldBundle {
           if (resource.type == 'model.glb') {
             validateVrzGlb(
               decoded,
-              maxSubmittedTriangles:
-                  isV2 ? maxModelTrianglesV2 : maxModelTriangles,
+              maxSubmittedTriangles: extended
+                  ? maxExtendedModelTriangles
+                  : maxModelTriangles,
               allowEmbeddedBaseColorTextures: true,
-              allowV2Graphics: isV2,
+              allowExtendedGraphics: extended,
             );
           } else if (resource.type == 'texture.ktx2') {
             VrlwTexturePolicy.validateKtx2Payload(
@@ -668,7 +680,7 @@ final class VrlzWorldBundle {
           }
           resources[resource.id] = decoded;
         }
-        VrlwLodProfile.validate(index, resources, allowMovingLod: isV2);
+        VrlwLodProfile.validate(index, resources, allowMovingLod: extended);
         VrlwMotionProfile.validate(index, resources);
         final reader = await VrlwPlaceReader.open(
           worldSource,
@@ -680,7 +692,8 @@ final class VrlzWorldBundle {
         return VrlzPreparedWorld(
           reader,
           Map.unmodifiable(resources),
-          isV2: isV2,
+          hasExtendedProfile: extended,
+          allowsKtx2Textures: allowKtx2,
         );
       } catch (_) {
         await worldSource.close();
@@ -700,9 +713,11 @@ final class VrlzWorldBundle {
       if (resource.type == 'model.glb') {
         validateVrzGlb(
           decoded,
-          maxSubmittedTriangles: isV2 ? maxModelTrianglesV2 : maxModelTriangles,
+          maxSubmittedTriangles: extended
+              ? maxExtendedModelTriangles
+              : maxModelTriangles,
           allowEmbeddedBaseColorTextures: true,
-          allowV2Graphics: isV2,
+          allowExtendedGraphics: extended,
         );
       } else if (resource.type == 'texture.ktx2') {
         VrlwTexturePolicy.validateKtx2Payload(
@@ -715,7 +730,7 @@ final class VrlzWorldBundle {
       }
       resources[resource.id] = decoded;
     }
-    VrlwLodProfile.validate(index, resources, allowMovingLod: isV2);
+    VrlwLodProfile.validate(index, resources, allowMovingLod: extended);
     VrlwMotionProfile.validate(index, resources);
     final source = VrlwMemorySource(data);
     try {
@@ -729,7 +744,8 @@ final class VrlzWorldBundle {
       return VrlzPreparedWorld(
         reader,
         Map.unmodifiable(resources),
-        isV2: isV2,
+        hasExtendedProfile: extended,
+        allowsKtx2Textures: allowKtx2,
       );
     } catch (_) {
       await source.close();
@@ -760,8 +776,14 @@ final class _SingleDigestSink implements Sink<crypto.Digest> {
 }
 
 final class VrlzPreparedWorld {
-  const VrlzPreparedWorld(this.reader, this.resources, {this.isV2 = false});
+  const VrlzPreparedWorld(
+    this.reader,
+    this.resources, {
+    this.hasExtendedProfile = false,
+    this.allowsKtx2Textures = false,
+  });
   final VrlwPlaceReader reader;
   final Map<String, Uint8List> resources;
-  final bool isV2;
+  final bool hasExtendedProfile;
+  final bool allowsKtx2Textures;
 }

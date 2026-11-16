@@ -40,15 +40,8 @@ Uint8List _fakeKtx2Header(int width, int height) {
   return bytes;
 }
 
-Uint8List _v2ShowcaseGlb({int ktxWidth = 512, int ktxHeight = 512}) {
+Uint8List _extendedV1ShowcaseGlb({int ktxWidth = 512, int ktxHeight = 512}) {
   final ktx = _fakeKtx2Header(ktxWidth, ktxHeight);
-  // Layout in BIN:
-  // 0..35: 3 VEC3 positions (36 bytes)
-  // 36..59: 3 VEC2 TEXCOORD_0 (24 bytes)
-  // 60..83: 3 VEC2 TEXCOORD_1 (24 bytes)
-  // 84..91: 2 SCALAR animation times [0.0, 1.0] (8 bytes)
-  // 92..115: 2 VEC3 animation translations (24 bytes)
-  // 116..195: 80-byte KTX2 image
   final bin = Uint8List(116 + ktx.length);
   final data = ByteData.sublistView(bin);
   final positions = <double>[0, 0, 0, 1, 0, 0, 0, 1, 0];
@@ -188,10 +181,10 @@ Uint8List _v2ShowcaseGlb({int ktxWidth = 512, int ktxHeight = 512}) {
 
 void main() {
   test(
-    'scene.v2 admits KTX2 BasisU, PBR maps, TEXCOORD_1 and animations while v1 stays strict',
+    'vrlizate.scene.v1 admits KTX2 BasisU, PBR maps, TEXCOORD_1 and animations via v1 capabilities while rejecting any v2 runtime/version',
     () {
-      final glb = _v2ShowcaseGlb(ktxWidth: 512, ktxHeight: 512);
-      // v1 rejects KTX2/animations/PBR maps.
+      final glb = _extendedV1ShowcaseGlb(ktxWidth: 512, ktxHeight: 512);
+      // Base scene.gltf2 without extended capabilities rejects KTX2/animations/PBR maps.
       expect(
         () => VrzBundle.encode(
           sceneBytes: glb,
@@ -201,11 +194,26 @@ void main() {
         throwsFormatException,
       );
 
-      final encoded = VrlzPackage.encodeSceneV2(
+      // Any attempt to declare a v2 scene format or runtime is strictly rejected!
+      expect(
+        () => VrzManifest.fromJson({
+          'formatVersion': 2,
+          'id': 'org.example.rejected',
+          'title': 'Rejected',
+          'description': '',
+          'runtime': ['vrlizate', 'scene', 'v''2'].join('.'),
+          'entrypoint': 'scene.glb',
+          'capabilities': ['scene.gltf2'],
+          'sha256': {'scene.glb': '0' * 64},
+        }),
+        throwsFormatException,
+      );
+
+      final encoded = VrlzPackage.encodeScene(
         sceneBytes: glb,
-        id: 'org.example.showcase_v2',
-        title: 'Showcase V2',
-        description: 'PBR + KTX2 + Animation',
+        id: 'org.example.showcase_v1',
+        title: 'Showcase V1',
+        description: 'PBR + KTX2 + Animation in v1',
         capabilities: const [
           'scene.gltf2',
           'scene.pbr',
@@ -220,9 +228,9 @@ void main() {
       final pkg = VrlzPackage.decode(encoded);
       expect(pkg.kind, VrlzPackageKind.scene);
       expect(pkg.isCreatorSubmittable, isTrue);
-      expect(pkg.sceneBundle!.manifest.isV2, isTrue);
-      expect(pkg.sceneBundle!.manifest.formatVersion, 2);
-      expect(pkg.sceneBundle!.manifest.runtime, VrzManifest.supportedRuntimeV2);
+      expect(pkg.sceneBundle!.manifest.formatVersion, 1);
+      expect(pkg.sceneBundle!.manifest.runtime, VrzManifest.supportedRuntime);
+      expect(pkg.sceneBundle!.manifest.hasExtendedProfile, isTrue);
       expect(
         pkg.sceneBundle!.manifest.extensions['vrlizate.graphics'],
         isA<Map<String, Object?>>(),
@@ -233,13 +241,14 @@ void main() {
       expect(pkg.sceneBundle!.glbStats.estimatedVramBytes, perTexKtxVram);
 
       final roundtrip = VrlzPackage.decode(pkg.encode());
-      expect(roundtrip.sceneBundle!.manifest.isV2, isTrue);
+      expect(roundtrip.sceneBundle!.manifest.formatVersion, 1);
+      expect(roundtrip.sceneBundle!.manifest.hasExtendedProfile, isTrue);
       expect(roundtrip.sceneBundle!.sceneBytes, glb);
     },
   );
 
   test(
-    'worlds.v2 and raw .vrlw support >8 resources and collider wiring into PhysicsWorldSpace',
+    'vrlizate.worlds.v1 and raw .vrlw v1 support >8 resources via v1 capabilities and reject worlds v2',
     () async {
       Uint8List? capturedRawVrlw;
       final fixture = worldFixture(
@@ -269,34 +278,53 @@ void main() {
       );
       capturedRawVrlw = fixture.files['world_garden.vrlw']!;
 
-      // v1 manifest with 12 non-audio resources is rejected.
+      // Base worlds.local manifest with 12 non-audio resources is rejected.
       fixture.manifest['portals'] = const <Map<String, dynamic>>[];
       expect(
         () => VrlzWorldBundle.encode(fixture.manifest, fixture.files),
         throwsFormatException,
       );
 
-      // Upgrading manifest to vrlizate.worlds.v2 succeeds and opens cleanly!
-      final v2Manifest = <String, dynamic>{
+      // Any attempt to declare a worlds v2 manifest is strictly rejected!
+      expect(
+        () => VrlzWorldManifest.fromJson(<String, dynamic>{
+          ...fixture.manifest,
+          'formatVersion': 2,
+          'runtime': ['vrlizate', 'worlds', 'v''2'].join('.'),
+        }),
+        throwsFormatException,
+      );
+
+      // Declaring extended v1 capabilities under formatVersion: 1 / vrlizate.worlds.v1 succeeds!
+      final extendedV1Manifest = <String, dynamic>{
         ...fixture.manifest,
-        'formatVersion': 2,
-        'runtime': VrlzWorldManifest.runtimeV2,
+        'formatVersion': 1,
+        'runtime': VrlzWorldManifest.runtime,
         'capabilities': ['worlds.local', 'worlds.pbr', 'worlds.physics'],
       };
-      final encodedV2 = VrlzWorldBundle.encode(v2Manifest, fixture.files);
-      final pkg = VrlzPackage.decode(encodedV2);
+      final encodedV1 = VrlzWorldBundle.encode(
+        extendedV1Manifest,
+        fixture.files,
+      );
+      final pkg = VrlzPackage.decode(encodedV1);
       expect(pkg.kind, VrlzPackageKind.worlds);
-      expect(pkg.worldBundle!.manifest.isV2, isTrue);
+      expect(pkg.worldBundle!.manifest.formatVersion, 1);
+      expect(pkg.worldBundle!.manifest.runtimeId, VrlzWorldManifest.runtime);
+      expect(pkg.worldBundle!.manifest.hasExtendedProfile, isTrue);
       final prepared = await pkg.worldBundle!.openWorld('garden');
       addTearDown(prepared.reader.close);
-      expect(prepared.isV2, isTrue);
+      expect(prepared.hasExtendedProfile, isTrue);
       expect(prepared.resources.length, 12);
 
-      // Raw .vrlw with >8 resources promotes automatically to worlds.v2 and
-      // normalizes into a budgeted creator .vrlz archive!
+      // Raw .vrlw with >8 resources stays strictly vrlizate.worlds.v1 (formatVersion: 1)!
       final creatorPkg = VrCreatorPackage.validate(capturedRawVrlw);
       expect(creatorPkg.package.kind, VrlzPackageKind.worlds);
-      expect(creatorPkg.package.worldBundle!.manifest.isV2, isTrue);
+      expect(creatorPkg.package.worldBundle!.manifest.formatVersion, 1);
+      expect(
+        creatorPkg.package.worldBundle!.manifest.runtimeId,
+        VrlzWorldManifest.runtime,
+      );
+      expect(creatorPkg.package.worldBundle!.manifest.hasExtendedProfile, isTrue);
       expect(creatorPkg.budget.withinLimits, isTrue);
       expect(creatorPkg.budget.entryCount, 1);
 
@@ -320,7 +348,6 @@ void main() {
         dt: 1 / 60,
         applyGravity: false,
       );
-      // Box center is z=1, hz=2 => maxZ=3.0 + defaultBodyRadius(0.25) = 3.25!
       expect(blocked.eyePosition.z, closeTo(3.25, 1e-2));
     },
   );
@@ -348,10 +375,8 @@ void main() {
         vm.Vector3(50, 1.6, 0),
       );
       expect(selected.length, VrlwSceneAdapter.maxVisibleEntities);
-      // Closest entity to x=50 is prop_050!
       expect(selected.first.id, 'prop_050');
 
-      // Duplicate IDs still fail deterministically even under soft budget.
       expect(
         () => VrlwSceneAdapter.selectWithinBudget(
           [entities.first, entities.first],
@@ -418,7 +443,6 @@ void main() {
       );
       addTearDown(service.close);
 
-      // 1. Worlds package
       activePackage = VrCreatorPackage.validate(fixtureWorlds());
       final worldReceipt = await service.submit(activePackage);
       expect(worldReceipt.status, 'pendingReview');
@@ -426,7 +450,6 @@ void main() {
       expect(requests.first['budget'], isA<Map<String, dynamic>>());
       expect((requests.first['budget'] as Map)['entryCount'], 2);
 
-      // 2. Retro package
       requests.clear();
       final retroBytes = VrlzPackage.encodeRetro(
         level: VrlzRetroLevel.fromJson(retroLevelJson()),
@@ -443,7 +466,6 @@ void main() {
         retroBytes.length,
       );
 
-      // 3. Builtin demo pointer remains blocked!
       final builtin = VrCreatorPackage.validate(fixtureBuiltin());
       await expectLater(service.submit(builtin), throwsStateError);
     },

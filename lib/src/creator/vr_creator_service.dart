@@ -40,11 +40,14 @@ final class VrCreatorPackageBudget {
   static const int maxSceneArchiveBytes = VrlzPackage.maxBytes;
   static const int maxWorldsArchiveBytes = VrlzWorldBundle.maxBytes;
   static const int maxRetroArchiveBytes = 256 * 1024;
-  static const int maxSceneVramBytes = VrzGlbV2Limits.maxEstimatedVramBytes;
-  static const int maxWorldsVramBytes = VrlzWorldBundle.maxWorldUnpackedBytesV2;
+  static const int maxSceneVramBytes =
+      VrzGlbExtendedLimits.maxEstimatedVramBytes;
+  static const int maxWorldsVramBytes =
+      VrlzWorldBundle.maxExtendedWorldUnpackedBytes;
   static const int maxRetroVramBytes = 1024 * 1024;
   static const int maxSceneTriangles = 250000;
-  static const int maxWorldModelTriangles = VrlzWorldBundle.maxModelTrianglesV2;
+  static const int maxWorldModelTriangles =
+      VrlzWorldBundle.maxExtendedModelTriangles;
 
   final VrlzPackageKind kind;
   final int archiveBytes;
@@ -92,7 +95,7 @@ class VrCreatorPackage {
       throw const FormatException('El archivo supera el límite de 32 MiB.');
     }
     final rawCopy = Uint8List.fromList(bytes);
-    var decoded = VrlzPackage.decode(rawCopy, allowRawVrlwV2: true);
+    var decoded = VrlzPackage.decode(rawCopy, allowExtendedRawVrlw: true);
     final Uint8List normalized;
     if (VrlzWorldBundle.hasRawVrlwMagic(rawCopy)) {
       // Promote standalone .vrlw places into a deterministic STORE .vrlz archive.

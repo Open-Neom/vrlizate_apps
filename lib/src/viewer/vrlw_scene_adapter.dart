@@ -118,14 +118,16 @@ class VrlwSceneAdapter {
     VrlwWorldActivity? activity,
     bool debugForceHighestLod = false,
     bool softResidencyBudget = true,
-    bool isV2 = false,
+    bool hasExtendedProfile = false,
+    bool allowKtx2Textures = false,
     VrQualityTier? qualityTier,
   }) async {
+    final enableKtx2 = allowKtx2Textures || hasExtendedProfile;
     // Also protect direct adapter callers before creating any scene resources.
     for (final resource in reader.index.resources) {
       VrlwTexturePolicy.validateDecoder(
         resource.type,
-        allowKtx2Textures: isV2,
+        allowKtx2Textures: enableKtx2,
       );
       if (resource.type == 'texture.ktx2') {
         final payload = resources[resource.id];
@@ -162,11 +164,11 @@ class VrlwSceneAdapter {
       final ormSampling = budget != null
           ? budget.samplingForRole(VrTextureRole.ormData)
           : const fs.TextureSampling(maxAnisotropy: 8);
-      final maxPrimitiveGroups = isV2 ? 512 : 128;
-      final maxGlbTexDim = isV2
+      final maxPrimitiveGroups = hasExtendedProfile ? 512 : 128;
+      final maxGlbTexDim = hasExtendedProfile
           ? (budget != null
                 ? budget.maxDimensionForRole(VrTextureRole.heroSurface)
-                : VrzGlbV2Limits.maxDimension)
+                : VrzGlbExtendedLimits.maxDimension)
           : VrzGlbTextureLimits.maxDimension;
 
       Future<fs.TextureSource?> loadTexture(
@@ -204,8 +206,8 @@ class VrlwSceneAdapter {
             sampling: activeSampling,
           );
         } else {
-          final formatMax = isV2
-              ? VrlwTexturePolicy.maxV2Ktx2Dimension
+          final formatMax = hasExtendedProfile
+              ? VrlwTexturePolicy.maxKtx2Dimension
               : VrlwBundleCodec.maxCompressedTextureDimension;
           final effectiveMax = roleCap != null && roleCap < formatMax
               ? roleCap
@@ -264,7 +266,7 @@ class VrlwSceneAdapter {
             : fs.ShadowCastingMode.off;
         final hasLod = binding.lods.isNotEmpty;
         if (hasLod &&
-            !isV2 &&
+            !hasExtendedProfile &&
             reader.index.motions.any(
               (motion) => motion.prototypeId == binding.prototypeId,
             )) {
@@ -455,7 +457,7 @@ class VrlwSceneAdapter {
           : vm.Vector3(1, .96, .9);
       final authoredSky = await loadVrlwAuthoredSky<fs.Skybox>(
         env,
-        allowKtx2Textures: isV2,
+        allowKtx2Textures: enableKtx2,
         resourceType: (id) => reader.index.resourceAt(id)!.type,
         fromEnvironment: (id) async =>
             vrlwEnvironmentSkybox(await loadEnvironment(id)),

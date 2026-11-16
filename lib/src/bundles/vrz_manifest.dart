@@ -1,4 +1,4 @@
-/// Immutable metadata for the deliberately small VRZ scene runtime.
+/// Immutable metadata for the deliberately small VRZ v1 scene runtime.
 final class VrzManifest {
   VrzManifest._({
     required this.formatVersion,
@@ -16,10 +16,10 @@ final class VrzManifest {
        cameraTarget = List.unmodifiable(target),
        extensions = Map.unmodifiable(extensions);
 
+  static const supportedFormatVersion = 1;
   static const supportedRuntime = 'vrlizate.scene.v1';
-  static const supportedRuntimeV2 = 'vrlizate.scene.v2';
   static const supportedCapability = 'scene.gltf2';
-  static const Set<String> supportedCapabilitiesV2 = {
+  static const Set<String> supportedCapabilities = {
     'scene.gltf2',
     'scene.pbr',
     'scene.ktx2',
@@ -39,44 +39,37 @@ final class VrzManifest {
   final List<double> cameraTarget;
   final Map<String, Object?> extensions;
 
-  bool get isV2 => formatVersion == 2 && runtime == supportedRuntimeV2;
+  /// Whether this `vrlizate.scene.v1` manifest opts into extended PBR, KTX2,
+  /// meshopt, lightmap, or animation capabilities beyond base `scene.gltf2`.
+  bool get hasExtendedProfile =>
+      capabilities.length > 1 || extensions.isNotEmpty;
+
   String get entrypoint => 'scene.glb';
   String get entrypointName => entrypoint;
 
   factory VrzManifest.fromJson(Map<String, Object?> json) {
     final version = json['formatVersion'];
     final runtime = json['runtime'];
-    final isV1 = version == 1 && runtime == supportedRuntime;
-    final isV2 = version == 2 && runtime == supportedRuntimeV2;
-    if (version is! int || (!isV1 && !isV2) || json['entrypoint'] != 'scene.glb') {
+    if (version is! int ||
+        version != supportedFormatVersion ||
+        runtime != supportedRuntime ||
+        json['entrypoint'] != 'scene.glb') {
       throw const FormatException(
         'Unsupported VRZ version, runtime or entrypoint.',
       );
     }
-    final allowedFields = isV2
-        ? const {
-            'formatVersion',
-            'id',
-            'title',
-            'description',
-            'runtime',
-            'entrypoint',
-            'capabilities',
-            'sha256',
-            'camera',
-            'extensions',
-          }
-        : const {
-            'formatVersion',
-            'id',
-            'title',
-            'description',
-            'runtime',
-            'entrypoint',
-            'capabilities',
-            'sha256',
-            'camera',
-          };
+    const allowedFields = {
+      'formatVersion',
+      'id',
+      'title',
+      'description',
+      'runtime',
+      'entrypoint',
+      'capabilities',
+      'sha256',
+      'camera',
+      'extensions',
+    };
     if (json.keys.any((key) => !allowedFields.contains(key))) {
       throw const FormatException('Unknown VRZ manifest field.');
     }
@@ -85,28 +78,20 @@ final class VrzManifest {
       throw const FormatException('Unsupported VRZ capabilities.');
     }
     final parsedCapabilities = <String>[];
-    if (isV1) {
-      if (rawCapabilities.length != 1 ||
-          rawCapabilities.single != supportedCapability) {
+    final seen = <String>{};
+    for (final cap in rawCapabilities) {
+      if (cap is! String ||
+          !supportedCapabilities.contains(cap) ||
+          !seen.add(cap)) {
         throw const FormatException('Unsupported VRZ capabilities.');
       }
-      parsedCapabilities.add(supportedCapability);
-    } else {
-      final seen = <String>{};
-      for (final cap in rawCapabilities) {
-        if (cap is! String ||
-            !supportedCapabilitiesV2.contains(cap) ||
-            !seen.add(cap)) {
-          throw const FormatException('Unsupported VRZ capabilities.');
-        }
-        parsedCapabilities.add(cap);
-      }
-      if (!seen.contains(supportedCapability)) {
-        throw const FormatException('VRZ v2 requires scene.gltf2 capability.');
-      }
+      parsedCapabilities.add(cap);
+    }
+    if (!seen.contains(supportedCapability)) {
+      throw const FormatException('VRZ v1 requires scene.gltf2 capability.');
     }
     var extensions = const <String, Object?>{};
-    if (isV2 && json.containsKey('extensions')) {
+    if (json.containsKey('extensions')) {
       final rawExt = json['extensions'];
       if (rawExt is! Map<String, Object?> || rawExt.length > 16) {
         throw const FormatException('Invalid VRZ extensions map.');
@@ -184,7 +169,7 @@ final class VrzManifest {
     'capabilities': capabilities,
     'sha256': {'scene.glb': sceneSha256},
     'camera': {'position': cameraPosition, 'target': cameraTarget},
-    if (isV2 && extensions.isNotEmpty) 'extensions': extensions,
+    if (extensions.isNotEmpty) 'extensions': extensions,
   };
 
   static List<double> _vector(Object? value) {

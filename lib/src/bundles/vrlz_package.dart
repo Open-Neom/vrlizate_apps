@@ -131,25 +131,15 @@ final class VrlzPackage {
     final scene = sceneBundle;
     if (scene != null) {
       final manifest = scene.manifest;
-      if (manifest.isV2) {
-        return VrzBundle.encodeV2(
-          sceneBytes: scene.sceneBytes,
-          id: manifest.id,
-          title: manifest.title,
-          description: manifest.description,
-          capabilities: manifest.capabilities,
-          cameraPosition: manifest.cameraPosition,
-          cameraTarget: manifest.cameraTarget,
-          extensions: manifest.extensions,
-        );
-      }
       return VrzBundle.encode(
         sceneBytes: scene.sceneBytes,
         id: manifest.id,
         title: manifest.title,
         description: manifest.description,
+        capabilities: manifest.capabilities,
         cameraPosition: manifest.cameraPosition,
         cameraTarget: manifest.cameraTarget,
+        extensions: manifest.extensions,
       );
     }
     final nes = nesBundle;
@@ -186,14 +176,14 @@ final class VrlzPackage {
   static VrlzPackage decode(
     Uint8List bytes, {
     Uri? source,
-    bool allowRawVrlwV2 = false,
+    bool allowExtendedRawVrlw = false,
   }) {
     if (VrlzWorldBundle.hasRawVrlwMagic(bytes)) {
       return VrlzPackage._worlds(
         VrlzWorldBundle.fromRawVrlw(
           bytes,
           source: source,
-          allowV2: allowRawVrlwV2,
+          allowExtendedProfile: allowExtendedRawVrlw,
         ),
       );
     }
@@ -220,10 +210,8 @@ final class VrlzPackage {
       throw const FormatException('Legacy VRLZ manifest exceeds 64 KiB.');
     }
     if (json['formatVersion'] is int &&
-        ((json['formatVersion'] == 1 &&
-                json['runtime'] == VrlzWorldManifest.runtime) ||
-            (json['formatVersion'] == 2 &&
-                json['runtime'] == VrlzWorldManifest.runtimeV2))) {
+        json['formatVersion'] == VrlzWorldManifest.supportedFormatVersion &&
+        json['runtime'] == VrlzWorldManifest.runtime) {
       return VrlzPackage._worlds(VrlzWorldBundle.decode(bytes, source: source));
     }
     if (json['runtime'] == VrlzWebGameManifest.runtime) {
@@ -238,10 +226,8 @@ final class VrlzPackage {
     // Select the runtime before validating its payload; a broken scene must
     // never be retried as a builtin descriptor or another runtime.
     if (json['formatVersion'] is int &&
-        ((json['formatVersion'] == 1 &&
-                json['runtime'] == VrzManifest.supportedRuntime) ||
-            (json['formatVersion'] == 2 &&
-                json['runtime'] == VrzManifest.supportedRuntimeV2))) {
+        json['formatVersion'] == VrzManifest.supportedFormatVersion &&
+        json['runtime'] == VrzManifest.supportedRuntime) {
       return VrlzPackage._scene(VrzBundle.decode(bytes, source: source));
     }
     if (json['formatVersion'] is int &&
@@ -316,10 +302,8 @@ final class VrlzPackage {
       final metadata = await archive.readEntryBytes('manifest.json');
       final json = decodeVrzJson(metadata);
       if (json['formatVersion'] is int &&
-          ((json['formatVersion'] == 1 &&
-                  json['runtime'] == VrlzWorldManifest.runtime) ||
-              (json['formatVersion'] == 2 &&
-                  json['runtime'] == VrlzWorldManifest.runtimeV2))) {
+          json['formatVersion'] == VrlzWorldManifest.supportedFormatVersion &&
+          json['runtime'] == VrlzWorldManifest.runtime) {
         final worldManifest = VrlzWorldManifest.fromJson(json);
         final worldBundle = await VrlzWorldBundle.fromStreamArchive(
           archive,
@@ -365,17 +349,18 @@ final class VrlzPackage {
     await worldBundle?.close();
   }
 
-  /// Creates a STORE-only v2 PBR/KTX2/meshopt/animation scene package.
-  static Uint8List encodeSceneV2({
+  /// Creates a STORE-only `vrlizate.scene.v1` package (`formatVersion: 1`),
+  /// supporting optional PBR, KTX2, meshopt, lightmap, and animation capabilities.
+  static Uint8List encodeScene({
     required Uint8List sceneBytes,
     required String id,
     required String title,
     String description = '',
-    List<String> capabilities = const ['scene.gltf2', 'scene.pbr'],
+    List<String> capabilities = const [VrzManifest.supportedCapability],
     List<double> cameraPosition = const [0, 1.6, 6],
     List<double> cameraTarget = const [0, 1, -6],
     Map<String, Object?> extensions = const {},
-  }) => VrzBundle.encodeV2(
+  }) => VrzBundle.encode(
     sceneBytes: sceneBytes,
     id: id,
     title: title,

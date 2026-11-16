@@ -371,7 +371,7 @@ void main() {
     });
 
     test(
-      'VrlzPackage.openStream opens multi-world v2 bundle without reading unvisited worlds',
+      'VrlzPackage.openStream opens multi-world v1 bundle without reading unvisited worlds',
       () async {
         final aliases = ['citadel', 'gallery', 'observatory', 'garden'];
         var lcg = 0x12345678;
@@ -394,8 +394,12 @@ void main() {
             };
           },
         );
-        fixture.manifest['formatVersion'] = 2;
-        fixture.manifest['runtime'] = VrlzWorldManifest.runtimeV2;
+        fixture.manifest['formatVersion'] = 1;
+        fixture.manifest['runtime'] = VrlzWorldManifest.runtime;
+        fixture.manifest['capabilities'] = const <String>[
+          'worlds.local',
+          'worlds.pbr',
+        ];
         fixture.manifest['entrypoint'] = 'garden';
         fixture.manifest['portals'] = [
           for (var i = 0; i < aliases.length; i++)
@@ -440,7 +444,9 @@ void main() {
           expect(pkg.kind, VrlzPackageKind.worlds);
           final bundle = pkg.worldBundle!;
           expect(bundle.isStreaming, isTrue);
-          expect(bundle.manifest.isV2, isTrue);
+          expect(bundle.manifest.formatVersion, 1);
+          expect(bundle.manifest.runtimeId, VrlzWorldManifest.runtime);
+          expect(bundle.manifest.hasExtendedProfile, isTrue);
           expect(bundle.manifest.worlds, hasLength(4));
 
           // Open ONLY `garden`: `world_citadel.vrlw`'s 128 KiB resource payload is NEVER read!
@@ -456,7 +462,7 @@ void main() {
             spy.readAnyByteInside(citadelResourceStart, citadelPayloadEnd),
             isFalse,
             reason:
-                'Streaming .vrlz v2 must only read world headers/indices on boot '
+                'Streaming .vrlz v1 must only read world headers/indices on boot '
                 'and never pull unvisited world payloads into RAM.',
           );
         } finally {
