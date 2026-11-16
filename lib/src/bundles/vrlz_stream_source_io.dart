@@ -3,8 +3,10 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:vrlizate/vrlizate.dart' show VrDirectDeviceBridge;
 import 'package:vrlizate_world/vrlizate_world.dart' show VrlwByteSource;
 
+import '../../src/third_party/posix_stream_io.g.dart';
 import 'vrlz_stream_source.dart';
 
 Future<VrlzRandomAccessSource> openFileRandomAccessSource(String path) =>
@@ -18,75 +20,23 @@ Future<VrlzRandomAccessSource> openPosixFdRandomAccessSource(
   String displayName = 'archive.vrlz',
 }) => PosixFdRandomAccessSource.openFd(fd, displayName: displayName);
 
+Future<VrlzRandomAccessSource> openAndroidSafUriRandomAccessSource(
+  String contentUri, {
+  String displayName = 'archive.vrlz',
+}) => PosixFdRandomAccessSource.openAndroidSafUri(
+  contentUri,
+  displayName: displayName,
+);
+
 VrlzTempBufferSink createTempBufferSink({required int expectedLength}) =>
     FileBackedTempBufferSink(expectedLength: expectedLength);
 
 // ---------------------------------------------------------------------------
-// POSIX FFI bindings (Android Bionic, Linux glibc/musl, macOS/iOS libSystem)
+// POSIX FFI bindings generated via `package:ffigen` (`posix_stream_io.g.dart`)
 // ---------------------------------------------------------------------------
 
-typedef _MallocNative = ffi.Pointer<ffi.Uint8> Function(ffi.IntPtr size);
-typedef _MallocDart = ffi.Pointer<ffi.Uint8> Function(int size);
-
-typedef _FreeNative = ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
-typedef _FreeDart = void Function(ffi.Pointer<ffi.Void> ptr);
-
-typedef _OpenNative =
-    ffi.Int32 Function(ffi.Pointer<ffi.Uint8> path, ffi.Int32 flags);
-typedef _OpenDart = int Function(ffi.Pointer<ffi.Uint8> path, int flags);
-
-typedef _CloseNative = ffi.Int32 Function(ffi.Int32 fd);
-typedef _CloseDart = int Function(int fd);
-
-typedef _FcntlDupNative =
-    ffi.Int32 Function(
-      ffi.Int32 fd,
-      ffi.Int32 cmd,
-      ffi.VarArgs<(ffi.Int32,)>,
-    );
-typedef _FcntlDupDart = int Function(int fd, int cmd, int minFd);
-
-typedef _Lseek64Native =
-    ffi.Int64 Function(ffi.Int32 fd, ffi.Int64 offset, ffi.Int32 whence);
-typedef _Lseek64Dart = int Function(int fd, int offset, int whence);
-
-typedef _Pread64Native =
-    ffi.IntPtr Function(
-      ffi.Int32 fd,
-      ffi.Pointer<ffi.Uint8> buf,
-      ffi.IntPtr count,
-      ffi.Int64 offset,
-    );
-typedef _Pread64Dart =
-    int Function(int fd, ffi.Pointer<ffi.Uint8> buf, int count, int offset);
-
-typedef _Mmap64Native =
-    ffi.IntPtr Function(
-      ffi.IntPtr addr,
-      ffi.IntPtr len,
-      ffi.Int32 prot,
-      ffi.Int32 flags,
-      ffi.Int32 fd,
-      ffi.Int64 offset,
-    );
-typedef _Mmap64Dart =
-    int Function(int addr, int len, int prot, int flags, int fd, int offset);
-
-typedef _MunmapNative = ffi.Int32 Function(ffi.IntPtr addr, ffi.IntPtr len);
-typedef _MunmapDart = int Function(int addr, int len);
-
 final class _PosixBindings {
-  _PosixBindings._({
-    required this.malloc,
-    required this.free,
-    required this.open,
-    required this.close,
-    required this.fcntlDup,
-    required this.lseek,
-    required this.pread,
-    required this.mmap,
-    required this.munmap,
-  });
+  _PosixBindings._(this._gen, {required this.use64Suffix});
 
   static final _PosixBindings? instance = _tryBind();
 
@@ -106,88 +56,79 @@ final class _PosixBindings {
   static const int protRead = 1;
   static const int mapPrivate = 2;
 
-  final _MallocDart malloc;
-  final _FreeDart free;
-  final _OpenDart open;
-  final _CloseDart close;
-  final _FcntlDupDart fcntlDup;
-  final _Lseek64Dart lseek;
-  final _Pread64Dart pread;
-  final _Mmap64Dart mmap;
-  final _MunmapDart munmap;
-
-  static ffi.Pointer<T> _lookupWith64Fallback<T extends ffi.NativeType>(
-    ffi.DynamicLibrary lib,
-    String baseName,
-  ) {
-    if ((Platform.isAndroid || Platform.isLinux) &&
-        ffi.sizeOf<ffi.IntPtr>() == 4) {
-      try {
-        return lib.lookup<T>('${baseName}64');
-      } catch (_) {}
-    }
-    return lib.lookup<T>(baseName);
-  }
+  final PosixStreamIoBindings _gen;
+  final bool use64Suffix;
 
   static _PosixBindings? _tryBind() {
     if (!isSupportedPlatform) return null;
     try {
       final lib = ffi.DynamicLibrary.process();
-      return _PosixBindings._(
-        malloc: lib.lookupFunction<_MallocNative, _MallocDart>('malloc'),
-        free: lib.lookupFunction<_FreeNative, _FreeDart>('free'),
-        open: lib.lookupFunction<_OpenNative, _OpenDart>('open'),
-        close: lib.lookupFunction<_CloseNative, _CloseDart>('close'),
-        fcntlDup: lib.lookupFunction<_FcntlDupNative, _FcntlDupDart>('fcntl'),
-        lseek: _lookupWith64Fallback<ffi.NativeFunction<_Lseek64Native>>(
-          lib,
-          'lseek',
-        ).asFunction<_Lseek64Dart>(),
-        pread: _lookupWith64Fallback<ffi.NativeFunction<_Pread64Native>>(
-          lib,
-          'pread',
-        ).asFunction<_Pread64Dart>(),
-        mmap: _lookupWith64Fallback<ffi.NativeFunction<_Mmap64Native>>(
-          lib,
-          'mmap',
-        ).asFunction<_Mmap64Dart>(),
-        munmap: lib.lookupFunction<_MunmapNative, _MunmapDart>('munmap'),
-      );
-    } catch (_) {
+      final gen = PosixStreamIoBindings(lib);
+      var needs64 = false;
+      if ((Platform.isAndroid || Platform.isLinux) &&
+          ffi.sizeOf<ffi.IntPtr>() == 4) {
+        try {
+          lib.lookup<ffi.NativeType>('pread64');
+          needs64 = true;
+        } on Object {
+          needs64 = false;
+        }
+      }
+      // Eagerly resolve core leaf symbols once so missing symbols fail closed.
+      final probe = gen.malloc(1);
+      if (probe != ffi.nullptr) gen.free(probe);
+      return _PosixBindings._(gen, use64Suffix: needs64);
+    } on Object {
       return null;
     }
   }
 
+  int close(int fd) => _gen.close(fd);
+
+  int fcntlDup(int fd, int cmd, int minFd) => _gen.fcntlInt(fd, cmd, minFd);
+
+  int lseek(int fd, int offset, int whence) =>
+      use64Suffix ? _gen.lseek64(fd, offset, whence) : _gen.lseek(fd, offset, whence);
+
+  int mmap(int addr, int len, int prot, int flags, int fd, int offset) {
+    final addrPtr = ffi.Pointer<ffi.Void>.fromAddress(addr);
+    final res = use64Suffix
+        ? _gen.mmap64(addrPtr, len, prot, flags, fd, offset)
+        : _gen.mmap(addrPtr, len, prot, flags, fd, offset);
+    return res.address;
+  }
+
+  int munmap(int addr, int len) =>
+      _gen.munmap(ffi.Pointer<ffi.Void>.fromAddress(addr), len);
+
   int openReadOnlyPath(String path) {
     final encoded = utf8.encode(path);
-    final cStr = malloc(encoded.length + 1);
-    if (cStr.address == 0) {
+    final cStr = _gen.malloc(encoded.length + 1).cast<ffi.Uint8>();
+    if (cStr == ffi.nullptr) {
       throw const FileSystemException('Out of native memory opening path.');
     }
     try {
       cStr.asTypedList(encoded.length).setAll(0, encoded);
       cStr[encoded.length] = 0;
-      return open(cStr, oRdonly | oCloexec);
+      return _gen.open(cStr.cast<ffi.Char>(), oRdonly | oCloexec);
     } finally {
-      free(cStr.cast());
+      _gen.free(cStr.cast());
     }
   }
 
   Uint8List preadExact(int fd, int offset, int length) {
     if (length == 0) return Uint8List(0);
-    final scratch = malloc(length);
-    if (scratch.address == 0) {
+    final scratch = _gen.malloc(length).cast<ffi.Uint8>();
+    if (scratch == ffi.nullptr) {
       throw const FileSystemException('Out of native memory in pread.');
     }
     try {
       var done = 0;
       while (done < length) {
-        final got = pread(
-          fd,
-          ffi.Pointer<ffi.Uint8>.fromAddress(scratch.address + done),
-          length - done,
-          offset + done,
-        );
+        final dst = ffi.Pointer<ffi.Void>.fromAddress(scratch.address + done);
+        final got = use64Suffix
+            ? _gen.pread64(fd, dst, length - done, offset + done)
+            : _gen.pread(fd, dst, length - done, offset + done);
         if (got == 0) {
           throw const FormatException(
             'Unexpected EOF during VRLZ random-access pread.',
@@ -202,7 +143,7 @@ final class _PosixBindings {
       }
       return Uint8List.fromList(scratch.asTypedList(length));
     } finally {
-      free(scratch.cast());
+      _gen.free(scratch.cast());
     }
   }
 }
@@ -237,6 +178,45 @@ final class PosixFdRandomAccessSource implements VrlzRandomAccessSource {
 
   @override
   bool get isClosed => _closed;
+
+  /// Opens a `content://` Android SAF URI directly via JNI (`detachFd`) and
+  /// owns the resulting POSIX file descriptor without duplicating it.
+  static Future<PosixFdRandomAccessSource> openAndroidSafUri(
+    String contentUri, {
+    String displayName = 'archive.vrlz',
+  }) async {
+    if (!Platform.isAndroid) {
+      throw UnsupportedError(
+        'openAndroidSafUri requires Android Storage Access Framework.',
+      );
+    }
+    final posix = _PosixBindings.instance;
+    if (posix == null) {
+      throw UnsupportedError('POSIX pread is unavailable on this runtime.');
+    }
+    final detachedFd = VrDirectDeviceBridge.instance
+        .detachAndroidSafReadOnlyFdSync(contentUri);
+    if (detachedFd == null || detachedFd < 0) {
+      throw FileSystemException(
+        'Failed to open Android SAF content URI via direct JNI.',
+        contentUri,
+      );
+    }
+    final size = posix.lseek(detachedFd, 0, _PosixBindings.seekEnd);
+    if (size < 0) {
+      posix.close(detachedFd);
+      throw FileSystemException(
+        'Android SAF content URI is unseekable (pipe/virtual stream).',
+        contentUri,
+      );
+    }
+    return PosixFdRandomAccessSource._(
+      ownedFd: detachedFd,
+      length: size,
+      displayName: displayName,
+      posix: posix,
+    );
+  }
 
   /// Duplicates [spec] (`"fd:<n>/<name>"`) with `F_DUPFD_CLOEXEC` and sizes it.
   static Future<PosixFdRandomAccessSource> openSpec(String spec) {

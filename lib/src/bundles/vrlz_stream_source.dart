@@ -97,6 +97,17 @@ abstract interface class VrlzRandomAccessSource {
     int fd, {
     String displayName = 'archive.vrlz',
   }) => backend.openPosixFdRandomAccessSource(fd, displayName: displayName);
+
+  /// Opens an Android Storage Access Framework (`content://`) URI directly via
+  /// native JNI (`ContentResolver.openFileDescriptor` -> `detachFd` -> `pread`)
+  /// with zero host Kotlin `MethodChannel` boilerplate and zero disk unpacking.
+  static Future<VrlzRandomAccessSource> openAndroidSafUri(
+    String contentUri, {
+    String displayName = 'archive.vrlz',
+  }) => backend.openAndroidSafUriRandomAccessSource(
+    contentUri,
+    displayName: displayName,
+  );
 }
 
 /// Read-only random-access buffer backed either by an unlinked temporary file

@@ -25,6 +25,15 @@ Future<VrlzRandomAccessSource> openPosixFdRandomAccessSource(
   );
 }
 
+Future<VrlzRandomAccessSource> openAndroidSafUriRandomAccessSource(
+  String contentUri, {
+  String displayName = 'archive.vrlz',
+}) {
+  throw UnsupportedError(
+    'Android SAF JNI VRLZ streaming is unavailable on Web.',
+  );
+}
+
 VrlzTempBufferSink createTempBufferSink({required int expectedLength}) =>
     _MemoryTempBufferSink(expectedLength);
 

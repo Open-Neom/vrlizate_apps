@@ -335,6 +335,29 @@ final class VrlzWorldBundle {
     return archive.readEntryBytes(world.file);
   }
 
+  /// Opens a multi-world `.vrlz` v1/v2 archive directly from an Android SAF
+  /// `content://` URI via JNI (`ContentResolver.openFileDescriptor().detachFd()`)
+  /// without copying or unpacking `.vrlw` payloads into RAM or app cache.
+  static Future<VrlzWorldBundle> openAndroidSafUri(
+    String contentUri, {
+    int maxArchiveBytes = maxStreamArchiveBytes,
+    int maxMemoryCacheBytes = VrlzStreamArchive.defaultMaxMemoryCacheBytes,
+    int tempFileThresholdBytes =
+        VrlzStreamArchive.defaultTempFileThresholdBytes,
+  }) async {
+    final randomSource = await VrlzRandomAccessSource.openAndroidSafUri(
+      contentUri,
+    );
+    return openStream(
+      randomSource,
+      source: Uri.tryParse(contentUri),
+      ownsSource: true,
+      maxArchiveBytes: maxArchiveBytes,
+      maxMemoryCacheBytes: maxMemoryCacheBytes,
+      tempFileThresholdBytes: tempFileThresholdBytes,
+    );
+  }
+
   /// Opens a multi-world `.vrlz` v1/v2 archive over [randomSource] (such as a
   /// local file or Android SAF `fd:<n>/<name>` descriptor) without unpacking or
   /// loading `.vrlw` payloads into RAM: only `manifest.json` and each world's

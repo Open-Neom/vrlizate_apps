@@ -267,6 +267,29 @@ final class VrlzPackage {
     throw const FormatException('Unsupported VRLZ format version or runtime.');
   }
 
+  /// Opens a `.vrlz` package directly from an Android Storage Access Framework
+  /// `content://` URI via JNI (`ContentResolver.openFileDescriptor().detachFd()`)
+  /// and streams over POSIX `pread()` without copying the archive to cache.
+  static Future<VrlzPackage> openAndroidSafUri(
+    String contentUri, {
+    int maxArchiveBytes = VrlzWorldBundle.maxStreamArchiveBytes,
+    int maxMemoryCacheBytes = VrlzStreamArchive.defaultMaxMemoryCacheBytes,
+    int tempFileThresholdBytes =
+        VrlzStreamArchive.defaultTempFileThresholdBytes,
+  }) async {
+    final randomSource = await VrlzRandomAccessSource.openAndroidSafUri(
+      contentUri,
+    );
+    return openStream(
+      randomSource,
+      source: Uri.tryParse(contentUri),
+      ownsSource: true,
+      maxArchiveBytes: maxArchiveBytes,
+      maxMemoryCacheBytes: maxMemoryCacheBytes,
+      tempFileThresholdBytes: tempFileThresholdBytes,
+    );
+  }
+
   /// Opens a `.vrlz` package from a [VrlzRandomAccessSource] (file path or
   /// Android SAF `fd:<n>/<name>` descriptor) without eagerly unpacking multi-world
   /// `.vrlz` containers into heap memory.
