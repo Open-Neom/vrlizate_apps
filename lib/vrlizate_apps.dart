@@ -18,6 +18,8 @@ export 'src/bundles/vrz_manifest.dart';
 export 'src/catalog/vrlz_web_catalog.dart';
 export 'src/bundles/vrlw_http_source.dart';
 export 'src/bundles/vrlw_audio_policy.dart';
+export 'src/bundles/vrlz_stream_source.dart';
+export 'src/bundles/vrlz_stream_archive.dart';
 export 'src/bundles/vrlz_world_manifest.dart';
 export 'src/bundles/vrlz_world_bundle.dart';
 export 'src/bundles/vrlz_world_session.dart';
@@ -30,3 +32,6 @@ export 'src/bundles/vrlz_web_game_manifest.dart';
 export 'src/bundles/vrlz_web_game_cache.dart'
     show VrlzWebGameCache, VrlzWebGameMemoryCache;
 export 'src/bundles/vrlz_web_game_loader.dart';
+export 'src/creator/vr_creator_service.dart';
+export 'src/games/underrun_3d_levels.dart';
+export 'src/games/underrun_3d_game.dart';

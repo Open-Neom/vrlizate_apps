@@ -1,8 +1,11 @@
 import 'dart:math' as math;
 
-/// Closed data contract for the initial portable-worlds beta runtime.
+/// Closed data contract for the portable-worlds v1 and v2 runtimes.
 final class VrlzWorldManifest {
   VrlzWorldManifest._(
+    this.formatVersion,
+    this.runtimeId,
+    this.capabilities,
     this.id,
     this.title,
     this.description,
@@ -10,17 +13,35 @@ final class VrlzWorldManifest {
     this.entrypoint,
     this.worlds,
     this.portals,
+    this.extensions,
   );
 
   static const runtime = 'vrlizate.worlds.v1';
+  static const runtimeV2 = 'vrlizate.worlds.v2';
+  static const Set<String> supportedCapabilitiesV2 = {
+    'worlds.local',
+    'worlds.pbr',
+    'worlds.ktx2',
+    'worlds.physics',
+    'worlds.interactivity',
+    'worlds.shared_assets',
+  };
+
   // Only the selected world prepares GPU resources; the archive still has a
   // 32 MiB aggregate cap. Catalog capacity is independent of the selected
-  // world's unchanged resident-region, geometry and texture budgets.
+  // world's resident-region, geometry and texture budgets.
   static const maxWorlds = 32;
   static const maxPortals = 64;
+
+  final int formatVersion;
+  final String runtimeId;
+  final List<String> capabilities;
   final String id, title, description, revision, entrypoint;
   final List<VrlzWorldEntry> worlds;
   final List<VrlzWorldPortal> portals;
+  final Map<String, Object?> extensions;
+
+  bool get isV2 => formatVersion == 2 && runtimeId == runtimeV2;
 
   VrlzWorldEntry world(String alias) => worlds.firstWhere(
     (world) => world.alias == alias,
@@ -28,7 +49,14 @@ final class VrlzWorldManifest {
   );
 
   factory VrlzWorldManifest.fromJson(Map<String, dynamic> json) {
-    _keys(json, const {
+    final version = json['formatVersion'];
+    final runtimeValue = json['runtime'];
+    final isV1 = version == 1 && runtimeValue == runtime;
+    final isV2 = version == 2 && runtimeValue == runtimeV2;
+    if (version is! int || (!isV1 && !isV2)) {
+      _fail('Unsupported worlds runtime or capabilities.');
+    }
+    const requiredKeys = {
       'formatVersion',
       'id',
       'title',
@@ -39,14 +67,47 @@ final class VrlzWorldManifest {
       'revision',
       'worlds',
       'portals',
-    });
-    if (json['formatVersion'] is! int ||
-        json['formatVersion'] != 1 ||
-        json['runtime'] != runtime ||
-        json['capabilities'] is! List ||
-        (json['capabilities'] as List).length != 1 ||
-        (json['capabilities'] as List).single != 'worlds.local') {
+    };
+    if (isV1) {
+      _keys(json, requiredKeys);
+    } else {
+      const allowedV2 = {...requiredKeys, 'extensions'};
+      if (!requiredKeys.every(json.containsKey) ||
+          !json.keys.every(allowedV2.contains)) {
+        _fail('Missing or unsupported manifest field.');
+      }
+    }
+    final rawCaps = json['capabilities'];
+    if (rawCaps is! List || rawCaps.isEmpty) {
       _fail('Unsupported worlds runtime or capabilities.');
+    }
+    final parsedCaps = <String>[];
+    if (isV1) {
+      if (rawCaps.length != 1 || rawCaps.single != 'worlds.local') {
+        _fail('Unsupported worlds runtime or capabilities.');
+      }
+      parsedCaps.add('worlds.local');
+    } else {
+      final seen = <String>{};
+      for (final cap in rawCaps) {
+        if (cap is! String ||
+            !supportedCapabilitiesV2.contains(cap) ||
+            !seen.add(cap)) {
+          _fail('Unsupported worlds runtime or capabilities.');
+        }
+        parsedCaps.add(cap);
+      }
+      if (!seen.contains('worlds.local')) {
+        _fail('VRLZ worlds v2 requires worlds.local capability.');
+      }
+    }
+    var extensions = const <String, Object?>{};
+    if (isV2 && json.containsKey('extensions')) {
+      final rawExt = json['extensions'];
+      if (rawExt is! Map<String, dynamic> || rawExt.length > 16) {
+        _fail('Invalid worlds extensions map.');
+      }
+      extensions = Map<String, Object?>.from(rawExt);
     }
     final id = _identifier(json['id']);
     final title = _text(json['title'], 96);
@@ -91,6 +152,9 @@ final class VrlzWorldManifest {
     }
     if (reachable.length != worlds.length) _fail('Unreachable included world.');
     return VrlzWorldManifest._(
+      version,
+      runtimeValue as String,
+      List.unmodifiable(parsedCaps),
       id,
       title,
       description,
@@ -98,20 +162,22 @@ final class VrlzWorldManifest {
       entrypoint,
       List.unmodifiable(worlds),
       List.unmodifiable(portals),
+      Map.unmodifiable(extensions),
     );
   }
 
   Map<String, dynamic> toJson() => {
-    'formatVersion': 1,
+    'formatVersion': formatVersion,
     'id': id,
     'title': title,
     'description': description,
-    'runtime': runtime,
+    'runtime': runtimeId,
     'entrypoint': entrypoint,
-    'capabilities': ['worlds.local'],
+    'capabilities': capabilities,
     'revision': revision,
     'worlds': worlds.map((world) => world.toJson()).toList(),
     'portals': portals.map((portal) => portal.toJson()).toList(),
+    if (isV2 && extensions.isNotEmpty) 'extensions': extensions,
   };
 }
 

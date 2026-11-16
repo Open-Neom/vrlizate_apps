@@ -276,6 +276,186 @@ void main() {
     },
   );
 
+  test('refresh snapshots each band before a reentrant iterator update', () {
+    final selector = VrlwLodSelector()..register('tree', policy());
+    final a = entity('a'), b = entity('b');
+    selector.replaceEntities([a, b]);
+    selector.update(VrWorldPosition(25, 1, 0), 0);
+    expect(selector.levelFor('a'), 1);
+    expect(selector.levelFor('b'), 1);
+
+    Iterable<VrWorldEntity> refresh() sync* {
+      yield a;
+      // Changes the old residents only. The first yielded band was already
+      // captured; the next yielded band must reflect this update.
+      selector.update(VrWorldPosition(5, 1, 0), 0, force: true);
+      yield b;
+    }
+
+    selector.replaceEntities(refresh());
+    expect(selector.levelFor('a'), 1);
+    expect(selector.levelFor('b'), 0);
+    expect(selector.trackedEntityCount, 2);
+    expect(selector.distanceEvaluations, 4);
+    expect(selector.changedPrototypeIds, {'tree'});
+    expect(selector.update(VrWorldPosition(18, 1, 0), 0), isFalse);
+    expect(selector.levelFor('a'), 1);
+    expect(selector.levelFor('b'), 0);
+    expect(selector.distanceEvaluations, 6);
+  });
+
+  test('nested replacement cannot mutate the outer band snapshot', () {
+    final selector = VrlwLodSelector()..register('tree', policy());
+    final a = entity('a'), b = entity('b');
+    selector.replaceEntities([a, b]);
+    selector.update(VrWorldPosition(25, 1, 0), 0);
+
+    Iterable<VrWorldEntity> refresh() sync* {
+      yield a;
+      selector.replaceEntities([
+        entity('a', position: VrWorldPosition(100, 0, 0)),
+        b,
+      ]);
+      selector.update(VrWorldPosition(80, 1, 0), 0, force: true);
+      yield b;
+    }
+
+    selector.replaceEntities(refresh());
+    expect(selector.levelFor('a'), 1);
+    expect(selector.levelFor('b'), 2);
+    expect(selector.distanceEvaluations, 4);
+    expect(selector.update(VrWorldPosition(5, 1, 0), 0), isTrue);
+    expect(selector.levelFor('a'), 0);
+    expect(selector.levelFor('b'), 0);
+    expect(selector.changedPrototypeIds, {'tree'});
+    expect(selector.distanceEvaluations, 6);
+  });
+
+  test('nested clear and registration retain each yielded policy snapshot', () {
+    final selector = VrlwLodSelector()..register('tree', policy());
+    final a = entity('a'), b = entity('b');
+    selector.replaceEntities([a, b]);
+    selector.update(VrWorldPosition(25, 1, 0), 0);
+
+    Iterable<VrWorldEntity> refresh() sync* {
+      yield a;
+      selector.clear();
+      selector.register(
+        'tree',
+        policy(
+          bounds: VrlwLodBounds(
+            minX: 0,
+            minY: 0,
+            minZ: -1,
+            maxX: 10,
+            maxY: 2,
+            maxZ: 1,
+          ),
+        ),
+      );
+      yield b;
+    }
+
+    selector.replaceEntities(refresh());
+    expect(selector.levelFor('a'), 1);
+    expect(selector.levelFor('b'), 0);
+    expect(selector.distanceEvaluations, 0);
+    // a still measures its original one-meter bounds; b uses the new policy.
+    expect(selector.update(VrWorldPosition(18, 1, 0), 0), isFalse);
+    expect(selector.levelFor('a'), 1);
+    expect(selector.levelFor('b'), 0);
+    expect(selector.distanceEvaluations, 2);
+  });
+
+  test(
+    'shared and fresh-equal transforms preserve geometry and changed yaw',
+    () {
+      final selector = VrlwLodSelector()
+        ..register(
+          'tree',
+          policy(
+            bounds: VrlwLodBounds(
+              minX: 0,
+              minY: 0,
+              minZ: 0,
+              maxX: 10,
+              maxY: 2,
+              maxZ: 2,
+            ),
+          ),
+        );
+      final original = entity(
+        'a',
+        position: VrWorldPosition(100, 0, 100),
+        yaw: math.pi / 2,
+        scale: 2,
+      );
+      final eye = VrWorldPosition(102, 1, 79);
+      selector.replaceEntities([original]);
+      selector.update(eye, 0);
+      expect(selector.levelFor('a'), 0);
+
+      final wrapper = original.copyWith();
+      expect(identical(wrapper, original), isFalse);
+      expect(identical(wrapper.transform, original.transform), isTrue);
+      selector.replaceEntities([wrapper]);
+      expect(selector.update(eye, 0), isFalse);
+      expect(selector.levelFor('a'), 0);
+
+      final equivalent = original.copyWith(
+        transform: original.transform.copyWith(),
+      );
+      expect(identical(equivalent.transform, original.transform), isFalse);
+      selector.replaceEntities([equivalent]);
+      expect(selector.update(eye, 0), isFalse);
+      expect(selector.levelFor('a'), 0);
+
+      selector.replaceEntities([
+        original.copyWith(
+          transform: original.transform.copyWith(yawRadians: 0),
+        ),
+      ]);
+      expect(selector.update(eye, 0), isTrue);
+      expect(selector.levelFor('a'), 1); // Now 21 m from the unrotated surface.
+
+      selector.replaceEntities([
+        original.copyWith(
+          transform: original.transform.copyWith(yawRadians: 0, scale: 10),
+        ),
+      ]);
+      expect(selector.update(VrWorldPosition(180, 1, 100), 0), isTrue);
+      expect(
+        selector.levelFor('a'),
+        0,
+      ); // Inside the enlarged, unrotated bounds.
+      expect(selector.distanceEvaluations, 5);
+    },
+  );
+
+  test('shared policy changes prototype without losing its band snapshot', () {
+    final shared = policy();
+    final selector = VrlwLodSelector()
+      ..register('tree', shared)
+      ..register('statue', shared);
+    final original = entity('a');
+    selector.replaceEntities([original]);
+    selector.update(VrWorldPosition(25, 1, 0), 0);
+    selector.replaceEntities([
+      VrWorldEntity(
+        id: 'a',
+        prototypeId: 'statue',
+        world: original.world,
+        transform: original.transform,
+      ),
+    ]);
+    expect(selector.levelFor('a'), 1);
+    expect(selector.update(VrWorldPosition(18, 1, 0), 0), isFalse);
+    expect(selector.levelFor('a'), 1);
+    expect(selector.changedPrototypeIds, isEmpty);
+    expect(selector.update(VrWorldPosition(5, 1, 0), 0), isTrue);
+    expect(selector.changedPrototypeIds, {'statue'});
+  });
+
   test(
     'invalid policies and distances cannot cause ambiguous band selection',
     () {

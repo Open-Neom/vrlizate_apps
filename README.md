@@ -99,9 +99,15 @@ renderer equivalente es `VrlzWorldSession.selectWorld(alias)`, que devuelve
 `false` para destinos desconocidos sin modificar la sesión. Esta selección es
 una acción del host; no agrega rutas ejecutables ni permite destinos externos.
 
-###Transporte HTTPS por rangos para lugares `.vrlw`
+### Transporte HTTPS por rangos y alcance de streaming para lugares `.vrlw` (`A09`)
 
-`VrlwHttpSource` exige respuestas `206 Partial Content` exactas y `ETag` fuerte para solicitar únicamente cabecera, índice y regiones activas junto con `vrlizate_world`.
+- **Streaming parcial remoto (`VrlwHttpSource` + `VrlwPlaceReader`):** `VrlwHttpSource` exige respuestas `206 Partial Content` exactas y `ETag` fuerte (`If-Match`) para descargar únicamente la cabecera (`16 B`), el índice frontal y los bloques de región activos bajo demanda sin transferir el contenedor `.vrlw` completo.
+- **Paquetes portátiles conectados (`VrlzWorldBundle` / `VrlzWorldViewer`):** un paquete `.vrlz` de perfil `vrlizate.worlds.v1` empaqueta sus mundos `.vrlw` dentro de un único archivo `ZIP STORE` acotado (`<= 32 MiB`) pensado para distribución offline/autocontenida. `VrlzWorldBundle.openWorld` valida modelos/recursos y prepara `VrlwMemorySource` en memoria, expandiendo únicamente las regiones cercanas a medida que el usuario camina (streaming de descompresión/GPU en memoria, no descarga HTTP individual por portal). Para mundos remotos servidos por rangos sin empaquetar dentro de un `.vrlz`, abre directamente `VrlwPlaceReader.open(VrlwHttpSource(...))` junto con `VrlwRegionProvider`.
+
+### Verificación de paquetes e identificación de cabeceras (`A10`)
+
+- `VrPackageIntegrityVerifier.verifyBundle(bytes, ...)` y `validateBundleOrThrow(bytes, ...)` ejecutan **validación estructural y criptográfica completa** equivalente a los decodificadores reales (`VrlzPackage.decode` para `.vrlz` y `VrlwBundleCodec` completo —cabecera, índice, SHA-256 e inflación acotada de cada bloque/recurso— para `.vrlw`), rechazando cabeceras truncadas de 4 bytes.
+- Cuando solo se requiera comprobar rápidamente los bytes mágicos (`PK\x03\x04` o `VRLW`) y un checksum de transporte (`CRC32` / `FNV-1a` / `SHA-256`) antes de decodificar, utiliza explícitamente `VrPackageIntegrityVerifier.verifySignatureAndChecksum(...)`.
 
 ### Herramientas CLI
 

@@ -10,11 +10,12 @@ import 'vrz_zip.dart';
 
 /// Validated, immutable data for an existing scene runtime, never executable code.
 final class VrzBundle {
-  VrzBundle._(this.manifest, Uint8List scene, this.source)
+  VrzBundle._(this.manifest, Uint8List scene, this.glbStats, this.source)
     : _scene = Uint8List.fromList(scene);
 
   static const maxBytes = 32 * 1024 * 1024;
   final VrzManifest manifest;
+  final VrzGlbStats glbStats;
   final Uri? source;
   final Uint8List _scene;
   Uint8List get sceneBytes => Uint8List.fromList(_scene);
@@ -30,8 +31,8 @@ final class VrzBundle {
         'scene.glb does not match the manifest SHA-256.',
       );
     }
-    validateVrzGlb(scene);
-    return VrzBundle._(manifest, scene, source);
+    final stats = inspectVrzGlbStats(scene, allowV2Graphics: manifest.isV2);
+    return VrzBundle._(manifest, scene, stats, source);
   }
 
   /// Creates a STORE-only v1 bundle and validates it using the same reader.
@@ -42,11 +43,9 @@ final class VrzBundle {
     String description = '',
     List<double> cameraPosition = const [0, 1.6, 6],
     List<double> cameraTarget = const [0, 1, -6],
-  }) {
-    if (sceneBytes.length > maxBytes) {
-      throw const FormatException('Scene exceeds the VRZ size budget.');
-    }
-    final manifest = VrzManifest.fromJson({
+  }) => _encodeWithManifest(
+    sceneBytes: sceneBytes,
+    manifestJson: {
       'formatVersion': 1,
       'id': id,
       'title': title,
@@ -56,7 +55,43 @@ final class VrzBundle {
       'capabilities': [VrzManifest.supportedCapability],
       'sha256': {'scene.glb': sha256.convert(sceneBytes).toString()},
       'camera': {'position': cameraPosition, 'target': cameraTarget},
-    });
+    },
+  );
+
+  /// Creates a STORE-only v2 PBR/KTX2/meshopt/animation scene bundle.
+  static Uint8List encodeV2({
+    required Uint8List sceneBytes,
+    required String id,
+    required String title,
+    String description = '',
+    List<String> capabilities = const ['scene.gltf2', 'scene.pbr'],
+    List<double> cameraPosition = const [0, 1.6, 6],
+    List<double> cameraTarget = const [0, 1, -6],
+    Map<String, Object?> extensions = const {},
+  }) => _encodeWithManifest(
+    sceneBytes: sceneBytes,
+    manifestJson: {
+      'formatVersion': 2,
+      'id': id,
+      'title': title,
+      'description': description,
+      'runtime': VrzManifest.supportedRuntimeV2,
+      'entrypoint': 'scene.glb',
+      'capabilities': capabilities,
+      'sha256': {'scene.glb': sha256.convert(sceneBytes).toString()},
+      'camera': {'position': cameraPosition, 'target': cameraTarget},
+      if (extensions.isNotEmpty) 'extensions': extensions,
+    },
+  );
+
+  static Uint8List _encodeWithManifest({
+    required Uint8List sceneBytes,
+    required Map<String, Object?> manifestJson,
+  }) {
+    if (sceneBytes.length > maxBytes) {
+      throw const FormatException('Scene exceeds the VRZ size budget.');
+    }
+    final manifest = VrzManifest.fromJson(manifestJson);
     final metadata = utf8.encode(jsonEncode(manifest.toJson()));
     final archive = Archive()
       ..add(ArchiveFile.noCompress('manifest.json', metadata.length, metadata))

@@ -37,6 +37,7 @@ class VrlzWorldViewer extends StatelessWidget {
     this.distanceLod = true,
     this.dynamicScaling = true,
     this.quality,
+    this.sgsrUpscale = VrSgsrUpscaleConfig.mobileBalanced,
     this.onQualityChanged,
   });
 
@@ -60,6 +61,7 @@ class VrlzWorldViewer extends StatelessWidget {
   final bool distanceLod;
   final bool dynamicScaling;
   final VrQualityPreset? quality;
+  final VrSgsrUpscaleConfig? sgsrUpscale;
   final void Function(VrQualityPreset)? onQualityChanged;
 
   @override
@@ -76,6 +78,7 @@ class VrlzWorldViewer extends StatelessWidget {
       distanceLod: distanceLod,
       dynamicScaling: dynamicScaling,
       quality: quality,
+      sgsrUpscale: sgsrUpscale,
       onQualityChanged: onQualityChanged,
     ),
   );
@@ -93,6 +96,7 @@ class _WorldPlayer extends StatefulWidget {
     required this.distanceLod,
     required this.dynamicScaling,
     this.quality,
+    this.sgsrUpscale,
     this.onQualityChanged,
   });
   final VrlzWorldBundle bundle;
@@ -104,6 +108,7 @@ class _WorldPlayer extends StatefulWidget {
   final bool distanceLod;
   final bool dynamicScaling;
   final VrQualityPreset? quality;
+  final VrSgsrUpscaleConfig? sgsrUpscale;
   final void Function(VrQualityPreset)? onQualityChanged;
   @override
   State<_WorldPlayer> createState() => _WorldPlayerState();
@@ -384,6 +389,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
         prepared.resources,
         isCurrent: current,
         debugForceHighestLod: !widget.distanceLod,
+        isV2: prepared.isV2,
         activity: _activities.putIfAbsent(
           prepared.reader.index.id,
           () => VrlwWorldActivity(prepared!.reader.index),
@@ -454,6 +460,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
       final pose = _session.pose;
       _rig.eyeCenter.setValues(pose.x, pose.y, pose.z);
       _lastValidPosition.setFrom(_rig.eyeCenter);
+      adapter.physicsSpace.resetCharacterState(grounded: true);
       _rig.bodyYaw = pose.yaw - _rig.cameraRig.yaw;
       _rig.bodyPitch = 0;
       _arrivalForward = _portalsArmed ? null : _rig.forward.clone();
@@ -1396,6 +1403,8 @@ class _WorldPlayerState extends State<_WorldPlayer>
       adapter.scene,
       _rig.eyeCenter,
       target,
+      physicsSpace: adapter.physicsSpace,
+      instanceTransformsOf: adapter.instanceTransformsForMesh,
       ignoredRoots: {
         if (_passportRoot != null) _passportRoot!,
         if (_objectiveRoot != null) _objectiveRoot!,
@@ -1492,29 +1501,38 @@ class _WorldPlayerState extends State<_WorldPlayer>
           ? HardwareKeyboard.instance.logicalKeysPressed
           : const <LogicalKeyboardKey>{};
       applyVrlzKeyboardMotion(_rig, keys, dt);
-      // Stay inside authored cells so a saved pose always has a valid region.
+      // Enforce vrlizate_physics colliders, step-up, gravity, and authored cells.
+      final adapter = _adapter!;
       final index = _prepared!.reader.index;
-      final eye = _rig.eyeCenter;
-      if (!eye.x.isFinite ||
-          !eye.y.isFinite ||
-          !eye.z.isFinite ||
-          eye.y.abs() > 1000000 ||
-          index.chunkAt(
-                (eye.x / index.cellSizeMeters).floor(),
-                (eye.z / index.cellSizeMeters).floor(),
-              ) ==
-              null) {
-        eye.setFrom(_lastValidPosition);
-      } else {
-        _lastValidPosition.setFrom(eye);
-      }
+      final spawn = widget.bundle.manifest.world(_session.currentWorld).spawn;
+      final baseFloorY = spawn[1] - adapter.physicsSpace.eyeHeight;
+      final hasColliders =
+          adapter.prototypeColliders.isNotEmpty &&
+          adapter.isCurrentCellResident(_lastValidPosition);
+      final stepped = adapter.physicsSpace.stepEyePosition(
+        previousEye: _lastValidPosition,
+        desiredEye: _rig.eyeCenter,
+        dt: dt,
+        baseFloorY: baseFloorY,
+        applyGravity: hasColliders,
+        jumpRequested:
+            !_passportOpen && keys.contains(LogicalKeyboardKey.space),
+        isCellValid: (x, z) =>
+            index.chunkAt(
+              (x / index.cellSizeMeters).floor(),
+              (z / index.cellSizeMeters).floor(),
+            ) !=
+            null,
+      );
+      _rig.eyeCenter.setFrom(stepped.eyePosition);
+      _lastValidPosition.setFrom(stepped.eyePosition);
       if (!_portalsArmed &&
           _arrivalForward != null &&
           _arrivalForward!.dot(_rig.forward) < .994521895) {
         _portalsArmed = true;
       }
-      _adapter?.setDistanceLod(widget.distanceLod);
-      _adapter?.update(_rig.eyeCenter, dt);
+      adapter.setDistanceLod(widget.distanceLod);
+      adapter.update(_rig.eyeCenter, dt);
       _questActor?.tick(dt, _rig.eyeCenter);
       _worldChangeOverlay?.tick(dt, _rig.eyeCenter);
       _audio?.update(listenerPosition: _rig.eyeCenter, listenerYaw: _rig.yaw);
@@ -1643,8 +1661,17 @@ class _WorldPlayerState extends State<_WorldPlayer>
                   key: ValueKey(_generation),
                   scene: _adapter!.scene,
                   rig: _rig,
-                  look: const VrLook(bloomIntensity: 0),
+                  look: VrLook(
+                    exposure: _adapter!.reader.index.environment?.exposure ?? 1,
+                    saturation: 1.05,
+                    contrast: 1.06,
+                    bloomIntensity: 0.22,
+                    bloomThreshold: 0.92,
+                    vignetteIntensity: 0.14,
+                    ambientOcclusion: true,
+                  ),
                   quality: widget.quality,
+                  sgsrUpscale: widget.sgsrUpscale,
                   dynamicScaling: widget.dynamicScaling,
                   onQualityChanged: widget.onQualityChanged,
                   enableHandTracking: false,

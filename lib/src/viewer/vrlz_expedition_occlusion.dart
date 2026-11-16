@@ -3,10 +3,14 @@ import 'dart:typed_data';
 
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
+import 'package:vrlizate_physics/vrlizate_physics.dart';
 
-/// Current resident geometry only. Scene's stock picker does not yet test
-/// InstancedMesh, so quest actions perform this bounded CPU check on selection,
-/// never during frame/gaze filtering. Motion instance matrices are read live.
+/// Current resident geometry and analytical physics colliders.
+///
+/// Quest actions perform this bounded CPU check on selection, never during
+/// frame/gaze filtering. Analytical solid colliders in [PhysicsWorldSpace] are
+/// checked first in O(N_colliders), followed by tracked [InstancedMesh] and
+/// regular [MeshComponent] primitives without touching internal engine members.
 final class VrlzExpeditionOcclusion {
   // Region eviction must also allow its decoded CPU geometry to be collected.
   Expando<fs.MeshData> _geometry = Expando<fs.MeshData>();
@@ -24,28 +28,35 @@ final class VrlzExpeditionOcclusion {
     vm.Vector3 eye,
     vm.Vector3 target, {
     Set<fs.Node> ignoredRoots = const {},
+    PhysicsWorldSpace? physicsSpace,
+    List<vm.Matrix4>? Function(fs.InstancedMesh mesh)? instanceTransformsOf,
   }) {
+    if (physicsSpace != null && physicsSpace.isSegmentOccluded(eye, target)) {
+      return false;
+    }
     var blocked = false;
     void visit(fs.Node node) {
       if (blocked || !node.visible || ignoredRoots.contains(node)) return;
-      for (final component in node.getComponents<fs.InstancedMeshComponent>()) {
-        final mesh = component.instancedMesh;
-        if (_transparent(mesh.material)) continue;
-        final data = _data(mesh.geometry);
-        // Scene exposes no public read-only transform getter. Read live values
-        // without mutation; flattening the authored mesh would miss animation.
-        // ignore: invalid_use_of_internal_member
-        for (final transform in mesh.instances) {
-          if (segmentBlocked(
-            eye,
-            target,
-            data.positions,
-            indices: data.indices,
-            transform: node.globalTransform.multiplied(transform),
-            bounds: mesh.geometry.localBounds,
-          )) {
-            blocked = true;
-            return;
+      if (instanceTransformsOf != null) {
+        for (final component
+            in node.getComponents<fs.InstancedMeshComponent>()) {
+          final mesh = component.instancedMesh;
+          if (_transparent(mesh.material)) continue;
+          final transforms = instanceTransformsOf(mesh);
+          if (transforms == null || transforms.isEmpty) continue;
+          final data = _data(mesh.geometry);
+          for (final transform in transforms) {
+            if (segmentBlocked(
+              eye,
+              target,
+              data.positions,
+              indices: data.indices,
+              transform: node.globalTransform.multiplied(transform),
+              bounds: mesh.geometry.localBounds,
+            )) {
+              blocked = true;
+              return;
+            }
           }
         }
       }

@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:collection';
 
+import 'package:vrlizate_scene/vrlizate_scene.dart' show VrDistanceBand;
 import 'package:vrlizate_world/vrlizate_world.dart';
 
 /// Immutable local-space bounds of the detailed, authored prototype.
@@ -48,11 +49,21 @@ final class VrlwLodPolicy {
         throw ArgumentError('LOD bands must be separated beyond hysteresis.');
       }
     }
+    _bands = [
+      for (final distance in distances.skip(1))
+        VrDistanceBand(
+          distanceMeters: distance,
+          enterMarginMeters: hysteresisMeters,
+          exitMarginMeters: hysteresisMeters,
+          includeBoundary: false,
+        ),
+    ];
   }
 
   final List<double> minDistancesMeters;
   final VrlwLodBounds bounds;
   final double hysteresisMeters;
+  late final List<VrDistanceBand> _bands;
 
   int levelAtDistance(double distanceMeters, {int? previousLevel}) {
     if (!distanceMeters.isFinite || distanceMeters < 0) {
@@ -60,8 +71,7 @@ final class VrlwLodPolicy {
     }
     if (previousLevel == null) {
       var level = 0;
-      while (level + 1 < minDistancesMeters.length &&
-          distanceMeters >= minDistancesMeters[level + 1]) {
+      while (level < _bands.length && !_bands[level].contains(distanceMeters)) {
         level++;
       }
       return level;
@@ -70,12 +80,12 @@ final class VrlwLodPolicy {
       throw ArgumentError.value(previousLevel, 'previousLevel');
     }
     var level = previousLevel;
-    while (level + 1 < minDistancesMeters.length &&
-        distanceMeters >= minDistancesMeters[level + 1] + hysteresisMeters) {
+    while (level < _bands.length &&
+        !_bands[level].contains(distanceMeters, wasInside: true)) {
       level++;
     }
     while (level > 0 &&
-        distanceMeters < minDistancesMeters[level] - hysteresisMeters) {
+        _bands[level - 1].contains(distanceMeters, wasInside: false)) {
       level--;
     }
     return level;
@@ -120,12 +130,27 @@ final class VrlwLodSelector {
       final policy = _policies[entity.prototypeId];
       if (policy == null) continue;
       final previous = _instances[entity.id];
-      next[entity.id] = _Instance(
-        entity.prototypeId,
-        entity.transform,
-        policy,
-        identical(previous?.policy, policy) ? previous?.level : null,
-      );
+      final level = identical(previous?.policy, policy)
+          ? previous?.level
+          : null;
+      if (previous != null && identical(previous.transform, entity.transform)) {
+        // Reuse immutable rotation values, never the mutable band snapshot.
+        next[entity.id] = _Instance.withRotation(
+          entity.prototypeId,
+          entity.transform,
+          policy,
+          level,
+          previous.cosine,
+          previous.sine,
+        );
+      } else {
+        next[entity.id] = _Instance(
+          entity.prototypeId,
+          entity.transform,
+          policy,
+          level,
+        );
+      }
     }
     _instances
       ..clear()
@@ -181,6 +206,15 @@ final class _Instance {
   _Instance(this.prototypeId, this.transform, this.policy, this.level)
     : cosine = math.cos(transform.yawRadians),
       sine = math.sin(transform.yawRadians);
+
+  _Instance.withRotation(
+    this.prototypeId,
+    this.transform,
+    this.policy,
+    this.level,
+    this.cosine,
+    this.sine,
+  );
 
   final String prototypeId;
   final VrWorldTransform transform;

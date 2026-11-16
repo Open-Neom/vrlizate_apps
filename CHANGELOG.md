@@ -1,5 +1,6 @@
-## 1.0.0 - 2026-10-20
+## 1.0.0 - 2026-11-06
 
+- Separate fast magic/digest preflight (`VrPackageIntegrityVerifier.verifySignatureAndChecksum`) from full structural and SHA-256 container validation (`verifyBundle` / `validateBundleOrThrow` via `VrlzPackage.decode` and `VrlwBundleCodec`), pin `archive: 4.3.0`, and document embedded `.vrlw` memory expansion vs `VrlwHttpSource` `HTTP 206` streaming (`A09`, `A10`).
 - Promover `vrlizate_apps` a la versión estable `1.0.0` bajo la estructura modular Open Neom (`lib/utils/constants/`, `lib/utils/enums/`, `lib/domain/models/`, `lib/domain/services/`).
 - Añadir perfil de paquetes WebGame v5 (`vrlizate.webgame.v1`), `VrlzWebGameManifest`, `VrlzWebGameBundle` y `VrlzWebGameCache` para empaquetar, verificar por SHA-256 y servir en caché juegos HTML5/WebGL open-source dentro de `.vrlz`.
 - Añadir `VrAppsConstants`, `VrMiniAppCategory` (`productivity`, `wellness`, `creativity`, `media`, `utilities`, `education`) y `VrSpatialMiniAppDescriptor` para describir mini-apps espaciales con soporte visor/handheld y distancia de colocación.

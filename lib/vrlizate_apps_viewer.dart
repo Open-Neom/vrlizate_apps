@@ -6,5 +6,6 @@ export 'src/viewer/vrz_scene_viewer.dart';
 export 'src/viewer/vrz_launcher.dart';
 
 export 'src/viewer/vrlz_world_viewer.dart';
+export 'src/viewer/vrlz_underrun_viewer.dart';
 
 export 'src/viewer/vrlw_world_audio.dart';

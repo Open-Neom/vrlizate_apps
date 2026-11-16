@@ -1,8 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:archive/archive.dart';
-
 import 'vrlz_builtin_manifest.dart';
 import 'vrlz_nes_bundle.dart';
 import 'vrlz_nes_manifest.dart';
@@ -13,6 +11,8 @@ import 'vrz_bundle.dart';
 import 'vrz_glb.dart' show decodeVrzJson;
 import 'vrz_manifest.dart';
 import 'vrz_zip.dart';
+import 'vrlz_stream_archive.dart';
+import 'vrlz_stream_source.dart';
 import 'vrlz_world_bundle.dart';
 import 'vrlz_world_manifest.dart';
 import 'vrlz_web_game_manifest.dart';
@@ -114,6 +114,13 @@ final class VrlzPackage {
       worldBundle!.manifest.description;
   String? get demoId => builtinManifest?.demoId;
 
+  /// Whether this package carries self-contained creator-authored data eligible
+  /// for budgeted submission (excluding platform demo pointers and external ROMs).
+  bool get isCreatorSubmittable =>
+      kind == VrlzPackageKind.scene ||
+      kind == VrlzPackageKind.worlds ||
+      kind == VrlzPackageKind.retro;
+
   /// Rebuilds a validated STORE container without retaining downloaded bytes.
   /// Metadata and camera are preserved; [source] is transport provenance only.
   Uint8List encode() {
@@ -124,6 +131,18 @@ final class VrlzPackage {
     final scene = sceneBundle;
     if (scene != null) {
       final manifest = scene.manifest;
+      if (manifest.isV2) {
+        return VrzBundle.encodeV2(
+          sceneBytes: scene.sceneBytes,
+          id: manifest.id,
+          title: manifest.title,
+          description: manifest.description,
+          capabilities: manifest.capabilities,
+          cameraPosition: manifest.cameraPosition,
+          cameraTarget: manifest.cameraTarget,
+          extensions: manifest.extensions,
+        );
+      }
       return VrzBundle.encode(
         sceneBytes: scene.sceneBytes,
         id: manifest.id,
@@ -164,10 +183,18 @@ final class VrlzPackage {
     );
   }
 
-  static VrlzPackage decode(Uint8List bytes, {Uri? source}) {
+  static VrlzPackage decode(
+    Uint8List bytes, {
+    Uri? source,
+    bool allowRawVrlwV2 = false,
+  }) {
     if (VrlzWorldBundle.hasRawVrlwMagic(bytes)) {
       return VrlzPackage._worlds(
-        VrlzWorldBundle.fromRawVrlw(bytes, source: source),
+        VrlzWorldBundle.fromRawVrlw(
+          bytes,
+          source: source,
+          allowV2: allowRawVrlwV2,
+        ),
       );
     }
     final files = readVrzZip(
@@ -193,8 +220,10 @@ final class VrlzPackage {
       throw const FormatException('Legacy VRLZ manifest exceeds 64 KiB.');
     }
     if (json['formatVersion'] is int &&
-        json['formatVersion'] == 1 &&
-        json['runtime'] == VrlzWorldManifest.runtime) {
+        ((json['formatVersion'] == 1 &&
+                json['runtime'] == VrlzWorldManifest.runtime) ||
+            (json['formatVersion'] == 2 &&
+                json['runtime'] == VrlzWorldManifest.runtimeV2))) {
       return VrlzPackage._worlds(VrlzWorldBundle.decode(bytes, source: source));
     }
     if (json['runtime'] == VrlzWebGameManifest.runtime) {
@@ -209,8 +238,10 @@ final class VrlzPackage {
     // Select the runtime before validating its payload; a broken scene must
     // never be retried as a builtin descriptor or another runtime.
     if (json['formatVersion'] is int &&
-        json['formatVersion'] == 1 &&
-        json['runtime'] == VrzManifest.supportedRuntime) {
+        ((json['formatVersion'] == 1 &&
+                json['runtime'] == VrzManifest.supportedRuntime) ||
+            (json['formatVersion'] == 2 &&
+                json['runtime'] == VrzManifest.supportedRuntimeV2))) {
       return VrlzPackage._scene(VrzBundle.decode(bytes, source: source));
     }
     if (json['formatVersion'] is int &&
@@ -235,6 +266,102 @@ final class VrlzPackage {
     }
     throw const FormatException('Unsupported VRLZ format version or runtime.');
   }
+
+  /// Opens a `.vrlz` package from a [VrlzRandomAccessSource] (file path or
+  /// Android SAF `fd:<n>/<name>` descriptor) without eagerly unpacking multi-world
+  /// `.vrlz` containers into heap memory.
+  static Future<VrlzPackage> openStream(
+    VrlzRandomAccessSource randomSource, {
+    Uri? source,
+    bool ownsSource = true,
+    int maxArchiveBytes = VrlzWorldBundle.maxStreamArchiveBytes,
+    int maxMemoryCacheBytes = VrlzStreamArchive.defaultMaxMemoryCacheBytes,
+    int tempFileThresholdBytes =
+        VrlzStreamArchive.defaultTempFileThresholdBytes,
+  }) async {
+    final archive = await VrlzStreamArchive.open(
+      randomSource,
+      ownsSource: ownsSource,
+      allowManifestOnly: true,
+      maxArchiveBytes: maxArchiveBytes,
+      maxEntries: VrlzWorldManifest.maxWorlds + 1,
+      maxMemoryCacheBytes: maxMemoryCacheBytes,
+      tempFileThresholdBytes: tempFileThresholdBytes,
+    );
+    var keepArchiveOpen = false;
+    try {
+      final metadata = await archive.readEntryBytes('manifest.json');
+      final json = decodeVrzJson(metadata);
+      if (json['formatVersion'] is int &&
+          ((json['formatVersion'] == 1 &&
+                  json['runtime'] == VrlzWorldManifest.runtime) ||
+              (json['formatVersion'] == 2 &&
+                  json['runtime'] == VrlzWorldManifest.runtimeV2))) {
+        final worldManifest = VrlzWorldManifest.fromJson(json);
+        final worldBundle = await VrlzWorldBundle.fromStreamArchive(
+          archive,
+          metadataBytes: metadata,
+          manifest: worldManifest,
+          source: source,
+        );
+        keepArchiveOpen = true;
+        return VrlzPackage._worlds(worldBundle);
+      }
+      if (json['runtime'] == VrlzWebGameManifest.runtime) {
+        if (archive.entries.length != 1) {
+          throw const FormatException(
+            'Webgame VRLZ must contain only a bounded manifest.json.',
+          );
+        }
+        return VrlzPackage._webgame(VrlzWebGameManifest.fromJson(json), source);
+      }
+      if (json['formatVersion'] is int &&
+          json['formatVersion'] == VrlzBuiltinManifest.supportedFormatVersion &&
+          json['runtime'] == VrlzBuiltinManifest.supportedRuntime) {
+        if (archive.entries.length != 1) {
+          throw const FormatException(
+            'Builtin VRLZ must contain only manifest.json.',
+          );
+        }
+        return VrlzPackage._builtin(VrlzBuiltinManifest.fromJson(json), source);
+      }
+      // Single-bundle packages (`scene`, `nes`, `retro`) fit <= 32 MiB.
+      if (randomSource.length > maxBytes) {
+        throw const FormatException('VRLZ package exceeds 32 MiB budget.');
+      }
+      final fullBytes = await randomSource.readRange(0, randomSource.length);
+      return decode(fullBytes, source: source);
+    } finally {
+      if (!keepArchiveOpen) {
+        await archive.close();
+      }
+    }
+  }
+
+  Future<void> close() async {
+    await worldBundle?.close();
+  }
+
+  /// Creates a STORE-only v2 PBR/KTX2/meshopt/animation scene package.
+  static Uint8List encodeSceneV2({
+    required Uint8List sceneBytes,
+    required String id,
+    required String title,
+    String description = '',
+    List<String> capabilities = const ['scene.gltf2', 'scene.pbr'],
+    List<double> cameraPosition = const [0, 1.6, 6],
+    List<double> cameraTarget = const [0, 1, -6],
+    Map<String, Object?> extensions = const {},
+  }) => VrzBundle.encodeV2(
+    sceneBytes: sceneBytes,
+    id: id,
+    title: title,
+    description: description,
+    capabilities: capabilities,
+    cameraPosition: cameraPosition,
+    cameraTarget: cameraTarget,
+    extensions: extensions,
+  );
 
   /// Small index only; JS/WASM/assets remain individually verified resources.
   static Uint8List encodeWebGame({required VrlzWebGameManifest manifest}) {
@@ -307,13 +434,10 @@ final class VrlzPackage {
       'capabilities': [VrlzBuiltinManifest.supportedCapability],
       'sha256': <String, String>{},
     });
-    final metadata = utf8.encode(jsonEncode(manifest.toJson()));
-    final archive = Archive()
-      ..add(ArchiveFile.noCompress('manifest.json', metadata.length, metadata));
-    final encoded = ZipEncoder().encodeBytes(
-      archive,
-      modified: DateTime.utc(2000),
+    final metadata = Uint8List.fromList(
+      utf8.encode(jsonEncode(manifest.toJson())),
     );
+    final encoded = writeVrzStoreZip({'manifest.json': metadata}, maxBytes);
     decode(encoded);
     return encoded;
   }

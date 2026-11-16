@@ -11,14 +11,86 @@ abstract final class VrzGlbTextureLimits {
   static const maxDecodedBytes = 1024 * 1024;
 }
 
+/// Admission limits for the v2 PBR/KTX2/meshopt/animation GLB profile.
+abstract final class VrzGlbV2Limits {
+  static const maxImages = 32;
+  static const maxDimension = 2048;
+  static const maxEstimatedVramBytes = 16 * 1024 * 1024;
+  static const maxMeshoptDecodedBytes = 16 * 1024 * 1024;
+  static const maxSkins = 64;
+  static const maxAnimations = 64;
+  static const maxMorphTargets = 8;
+
+  static const Set<String> allowedExtensions = {
+    'KHR_materials_unlit',
+    'KHR_texture_basisu',
+    'EXT_meshopt_compression',
+    'KHR_texture_transform',
+    'KHR_lights_punctual',
+    'KHR_materials_emissive_strength',
+    'KHR_materials_clearcoat',
+    'KHR_materials_sheen',
+    'KHR_materials_transmission',
+    'KHR_materials_ior',
+    'KHR_materials_specular',
+    'KHR_materials_iridescence',
+    'KHR_materials_anisotropy',
+    'KHR_materials_volume',
+    'KHR_materials_dispersion',
+    'KHR_materials_diffuse_transmission',
+    'KHR_materials_variants',
+    'KHR_mesh_quantization',
+  };
+}
+
+/// Deterministic geometry and GPU-memory stats extracted during GLB validation.
+typedef VrzGlbStats = ({
+  int submittedTriangles,
+  int submittedVertices,
+  int estimatedVramBytes,
+});
+
+const List<int> _ktx2Magic = <int>[
+  0xAB,
+  0x4B,
+  0x54,
+  0x58,
+  0x20,
+  0x32,
+  0x30,
+  0xBB,
+  0x0D,
+  0x0A,
+  0x1A,
+  0x0A,
+];
+
 /// The scene subset is intentionally smaller than all of glTF 2.0.
-/// Existing VRZ scenes remain texture-free; only portable worlds opt in.
+/// Existing v1 VRZ scenes remain texture-free; portable worlds v1 opt into
+/// bounded base-color PNGs, and v2 scenes/worlds opt into PBR, KTX2 BasisU,
+/// meshopt compression, lightmap UVs (`TEXCOORD_1`), skinning, and animations.
 void validateVrzGlb(
   Uint8List bytes, {
   int maxSubmittedTriangles = 250000,
   bool allowEmbeddedBaseColorTextures = false,
+  bool allowV2Graphics = false,
 }) {
-  void fail(String message) => throw FormatException('VRZ GLB: $message');
+  inspectVrzGlbStats(
+    bytes,
+    maxSubmittedTriangles: maxSubmittedTriangles,
+    allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
+    allowV2Graphics: allowV2Graphics,
+  );
+}
+
+/// Validates [bytes] and returns deterministic geometry and VRAM accounting.
+VrzGlbStats inspectVrzGlbStats(
+  Uint8List bytes, {
+  int maxSubmittedTriangles = 250000,
+  bool allowEmbeddedBaseColorTextures = false,
+  bool allowV2Graphics = false,
+}) {
+  Never fail(String message) => throw FormatException('VRZ GLB: $message');
   if (bytes.length < 28) fail('truncated header');
   final data = ByteData.sublistView(bytes);
   if (data.getUint32(0, Endian.little) != 0x46546c67 ||
@@ -52,112 +124,239 @@ void validateVrzGlb(
   if (chunks != 2 || root == null || binary == null) {
     fail('JSON and BIN chunks are required');
   }
-  final json = root!;
-  final bin = binary!;
+  final json = root;
+  final bin = binary;
   final asset = _map(json['asset'], 'asset');
   if (asset['version'] != '2.0' ||
       (asset['minVersion'] != null && asset['minVersion'] != '2.0')) {
     fail('unsupported glTF asset version');
   }
+  final allowTextures = allowEmbeddedBaseColorTextures || allowV2Graphics;
   _checkTree(
     json,
     allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
+    allowV2Graphics: allowV2Graphics,
   );
   for (final key in [
-    if (!allowEmbeddedBaseColorTextures) ...['images', 'textures', 'samplers'],
-    'animations',
-    'skins',
+    if (!allowTextures) ...['images', 'textures', 'samplers'],
+    if (!allowV2Graphics) ...['animations', 'skins'],
     'cameras',
   ]) {
     if (_list(json[key], key).isNotEmpty) {
       fail('$key are not supported in version 1');
     }
   }
+  final allowedExtensions = allowV2Graphics
+      ? VrzGlbV2Limits.allowedExtensions
+      : const {'KHR_materials_unlit'};
   for (final key in ['extensionsUsed', 'extensionsRequired']) {
     final extensions = _list(json[key], key);
     if (extensions.toSet().length != extensions.length ||
-        extensions.any((value) => value != 'KHR_materials_unlit')) {
+        extensions.any(
+          (value) => value is! String || !allowedExtensions.contains(value),
+        )) {
       fail('unsupported or duplicate extensions');
     }
   }
   final buffers = _list(json['buffers'], 'buffers');
-  if (buffers.length != 1) fail('exactly one embedded buffer is required');
-  final buffer = _map(buffers.single, 'buffer');
-  final bufferLength = _integer(buffer['byteLength'], 'buffer.byteLength');
+  if (buffers.isEmpty ||
+      (!allowV2Graphics && buffers.length != 1) ||
+      buffers.length > 8) {
+    fail('exactly one embedded buffer is required');
+  }
+  final primaryBuffer = _map(buffers.first, 'buffer');
+  final bufferLength = _integer(
+    primaryBuffer['byteLength'],
+    'buffer.byteLength',
+  );
   if (bufferLength > bin.length || bin.length - bufferLength > 3) {
     fail('buffer length disagrees with BIN');
+  }
+  final fallbackBuffers = <int>{};
+  for (var i = 1; i < buffers.length; i++) {
+    final extra = _map(buffers[i], 'buffer');
+    _integer(extra['byteLength'], 'buffer.byteLength');
+    final ext = extra['extensions'];
+    final meshopt = ext is Map ? ext['EXT_meshopt_compression'] : null;
+    if (meshopt is! Map || meshopt['fallback'] != true) {
+      fail('secondary buffers must be EXT_meshopt_compression fallbacks');
+    }
+    fallbackBuffers.add(i);
   }
   final views = _list(json['bufferViews'], 'bufferViews');
   final accessors = _list(json['accessors'], 'accessors');
   if (views.length > 4096 || accessors.length > 4096) {
     fail('too many buffer views or accessors');
   }
-  final viewInfo = <({int start, int length, int? stride})>[];
+  var totalMeshoptDecoded = 0;
+  final viewInfo = <({int start, int length, int? stride, bool isMeshopt})>[];
   for (final value in views) {
     final view = _map(value, 'bufferView');
-    if (view['buffer'] != 0) fail('bufferView must use buffer 0');
-    final start = _integer(view['byteOffset'] ?? 0, 'bufferView.byteOffset');
-    final length = _integer(view['byteLength'], 'bufferView.byteLength');
+    final ext = view['extensions'];
+    final meshopt = allowV2Graphics && ext is Map
+        ? ext['EXT_meshopt_compression']
+        : null;
     final stride = view['byteStride'] == null
         ? null
         : _integer(view['byteStride'], 'byteStride');
-    if (start + length > bufferLength ||
-        length == 0 ||
-        (stride != null && (stride < 4 || stride > 252 || stride % 4 != 0))) {
+    if (stride != null && (stride < 4 || stride > 252 || stride % 4 != 0)) {
       fail('invalid bufferView range or stride');
     }
-    viewInfo.add((start: start, length: length, stride: stride));
+    if (meshopt != null) {
+      final comp = _map(meshopt, 'EXT_meshopt_compression');
+      if (comp['buffer'] != 0) {
+        fail('EXT_meshopt_compression must read from buffer 0');
+      }
+      final viewBuf = _integer(view['buffer'], 'bufferView.buffer');
+      if (viewBuf != 0 && !fallbackBuffers.contains(viewBuf)) {
+        fail('meshopt bufferView must reference buffer 0 or fallback buffer');
+      }
+      final compOffset = _integer(
+        comp['byteOffset'] ?? 0,
+        'meshopt.byteOffset',
+      );
+      final compLength = _integer(comp['byteLength'], 'meshopt.byteLength');
+      final compStride = _integer(comp['byteStride'], 'meshopt.byteStride');
+      final compCount = _integer(comp['count'], 'meshopt.count');
+      final declaredLength = _integer(view['byteLength'], 'view.byteLength');
+      if (compLength == 0 ||
+          compOffset + compLength > bufferLength ||
+          compStride < 1 ||
+          compStride > 256 ||
+          compCount == 0 ||
+          compCount * compStride != declaredLength) {
+        fail('invalid EXT_meshopt_compression range');
+      }
+      totalMeshoptDecoded += declaredLength;
+      if (totalMeshoptDecoded > VrzGlbV2Limits.maxMeshoptDecodedBytes) {
+        fail('meshopt decoded byte budget exceeded');
+      }
+      viewInfo.add((
+        start: 0,
+        length: declaredLength,
+        stride: stride,
+        isMeshopt: true,
+      ));
+      continue;
+    }
+    if (view['buffer'] != 0) fail('bufferView must use buffer 0');
+    final start = _integer(view['byteOffset'] ?? 0, 'bufferView.byteOffset');
+    final length = _integer(view['byteLength'], 'bufferView.byteLength');
+    if (start + length > bufferLength || length == 0) {
+      fail('invalid bufferView range or stride');
+    }
+    viewInfo.add((
+      start: start,
+      length: length,
+      stride: stride,
+      isMeshopt: false,
+    ));
   }
+
   final textures = _list(json['textures'], 'textures');
-  if (allowEmbeddedBaseColorTextures) {
+  var uploadedVramBytes = 0;
+  if (allowTextures) {
     final images = _list(json['images'], 'images');
     final samplers = _list(json['samplers'], 'samplers');
-    if (images.length > VrzGlbTextureLimits.maxImages ||
-        textures.length > VrzGlbTextureLimits.maxImages ||
-        samplers.length > VrzGlbTextureLimits.maxImages) {
+    final maxImages = allowV2Graphics
+        ? VrzGlbV2Limits.maxImages
+        : VrzGlbTextureLimits.maxImages;
+    final maxDim = allowV2Graphics
+        ? VrzGlbV2Limits.maxDimension
+        : VrzGlbTextureLimits.maxDimension;
+    final maxVram = allowV2Graphics
+        ? VrzGlbV2Limits.maxEstimatedVramBytes
+        : VrzGlbTextureLimits.maxDecodedBytes;
+    if (images.length > maxImages ||
+        textures.length > maxImages ||
+        samplers.length > maxImages) {
       fail('embedded texture count budget exceeded');
     }
     var decodedBytes = 0;
-    final imagePixels = <int>[];
+    final imageVramBytes = <int>[];
     for (final value in images) {
       final image = _map(value, 'image');
-      if (image['mimeType'] != 'image/png') {
-        fail('embedded images must declare image/png');
-      }
-      final view =
-          viewInfo[_index(
-            image['bufferView'],
-            viewInfo.length,
-            'image.bufferView',
-          )];
-      if (view.stride != null) fail('PNG bufferView cannot have byteStride');
-      final size = VrlwBundleCodec.validatePngTextureBytes(
-        Uint8List.sublistView(bin, view.start, view.start + view.length),
-        requireComplete: true,
-        maxDimension: VrzGlbTextureLimits.maxDimension,
+      final mime = image['mimeType'];
+      final viewIdx = _index(
+        image['bufferView'],
+        viewInfo.length,
+        'image.bufferView',
       );
-      if (size.width > VrzGlbTextureLimits.maxDimension ||
-          size.height > VrzGlbTextureLimits.maxDimension) {
-        fail('embedded PNG exceeds 256 pixels per side');
+      final view = viewInfo[viewIdx];
+      if (view.stride != null || view.isMeshopt) {
+        fail('image bufferView cannot have byteStride or meshopt');
       }
-      final pixels = size.width * size.height * 4;
-      imagePixels.add(pixels);
-      decodedBytes += pixels;
+      final imgBytes = Uint8List.sublistView(
+        bin,
+        view.start,
+        view.start + view.length,
+      );
+      int estimatedBytes;
+      if (mime == 'image/png') {
+        final size = VrlwBundleCodec.validatePngTextureBytes(
+          imgBytes,
+          requireComplete: true,
+          maxDimension: maxDim,
+        );
+        if (size.width > maxDim || size.height > maxDim) {
+          fail('embedded PNG exceeds dimension budget');
+        }
+        estimatedBytes = size.width * size.height * 4;
+      } else if (allowV2Graphics && mime == 'image/ktx2') {
+        final size = _validateKtx2Bytes(imgBytes, maxDim);
+        // Transcoded GPU block formats (ASTC/ETC2/BC7) + mip chain average
+        // <= 10.67 bits/pixel (~1/3 of uncompressed RGBA8).
+        estimatedBytes = (size.width * size.height * 4 + 2) ~/ 3;
+      } else if (allowV2Graphics && mime == 'image/jpeg') {
+        final size = _validateJpegBytes(imgBytes, maxDim);
+        estimatedBytes = size.width * size.height * 4;
+      } else {
+        fail(
+          allowV2Graphics
+              ? 'embedded images must declare image/png, image/jpeg or image/ktx2'
+              : 'embedded images must declare image/png',
+        );
+      }
+      imageVramBytes.add(estimatedBytes);
+      decodedBytes += estimatedBytes;
     }
-    if (decodedBytes > VrzGlbTextureLimits.maxDecodedBytes) {
-      fail('embedded PNG decoded-byte budget exceeded');
+    if (decodedBytes > maxVram) {
+      fail('embedded texture decoded-byte budget exceeded');
     }
-    var uploadedBytes = 0;
     for (final value in textures) {
       final texture = _map(value, 'texture');
-      final source = _index(texture['source'], images.length, 'texture.source');
-      // The importer uploads once per texture entry, even for a shared image.
-      uploadedBytes += imagePixels[source];
+      int? sourceIndex;
+      if (allowV2Graphics && texture['extensions'] is Map) {
+        final texExt = _map(texture['extensions'], 'texture.extensions');
+        if (texExt.containsKey('KHR_texture_basisu')) {
+          final basisu = _map(
+            texExt['KHR_texture_basisu'],
+            'KHR_texture_basisu',
+          );
+          sourceIndex = _index(
+            basisu['source'],
+            images.length,
+            'KHR_texture_basisu.source',
+          );
+        }
+      }
+      if (texture.containsKey('source')) {
+        final fallbackSource = _index(
+          texture['source'],
+          images.length,
+          'texture.source',
+        );
+        sourceIndex ??= fallbackSource;
+      }
+      if (sourceIndex == null) {
+        fail('texture requires source or KHR_texture_basisu.source');
+      }
+      uploadedVramBytes += imageVramBytes[sourceIndex];
       if (texture.containsKey('sampler')) {
         _index(texture['sampler'], samplers.length, 'texture.sampler');
       }
     }
-    if (uploadedBytes > VrzGlbTextureLimits.maxDecodedBytes) {
+    if (uploadedVramBytes > maxVram) {
       fail('embedded texture upload budget exceeded');
     }
     for (final value in samplers) {
@@ -173,6 +372,7 @@ void validateVrzGlb(
       }
     }
   }
+
   final info =
       <
         ({
@@ -182,6 +382,7 @@ void validateVrzGlb(
           int maximum,
           double absoluteMaximum,
           bool normalized,
+          bool isMeshopt,
         })
       >[];
   var totalComponents = 0;
@@ -211,6 +412,7 @@ void validateVrzGlb(
       'VEC2' => 2,
       'VEC3' => 3,
       'VEC4' => 4,
+      'MAT4' when allowV2Graphics => 16,
       _ => 0,
     };
     final normalized = accessor['normalized'] ?? false;
@@ -223,7 +425,9 @@ void validateVrzGlb(
       fail('unsupported accessor shape, component or count');
     }
     totalComponents += count * components;
-    if (totalComponents > 4000000) fail('accessor component budget exceeded');
+    if (totalComponents > (allowV2Graphics ? 8000000 : 4000000)) {
+      fail('accessor component budget exceeded');
+    }
     final local = _integer(accessor['byteOffset'] ?? 0, 'accessor.byteOffset');
     final elementSize = componentSize * components;
     final stride = view.stride ?? elementSize;
@@ -235,24 +439,29 @@ void validateVrzGlb(
     }
     var maximum = 0;
     var absoluteMaximum = 0.0;
-    for (var item = 0; item < count; item++) {
-      for (var channel = 0; channel < components; channel++) {
-        final at = view.start + local + item * stride + channel * componentSize;
-        if (component == 5126) {
-          final number = binaryData.getFloat32(at, Endian.little);
-          if (!number.isFinite || number.abs() > 1000000) {
-            fail('non-finite or excessive geometry value');
+    if (!view.isMeshopt) {
+      for (var item = 0; item < count; item++) {
+        for (var channel = 0; channel < components; channel++) {
+          final at =
+              view.start + local + item * stride + channel * componentSize;
+          if (component == 5126) {
+            final number = binaryData.getFloat32(at, Endian.little);
+            if (!number.isFinite || number.abs() > 1000000) {
+              fail('non-finite or excessive geometry value');
+            }
+            if (number.abs() > absoluteMaximum) {
+              absoluteMaximum = number.abs();
+            }
+          } else if (component == 5121 ||
+              component == 5123 ||
+              component == 5125) {
+            final number = switch (component) {
+              5121 => binaryData.getUint8(at),
+              5123 => binaryData.getUint16(at, Endian.little),
+              _ => binaryData.getUint32(at, Endian.little),
+            };
+            if (number > maximum) maximum = number;
           }
-          if (number.abs() > absoluteMaximum) absoluteMaximum = number.abs();
-        } else if (component == 5121 ||
-            component == 5123 ||
-            component == 5125) {
-          final number = switch (component) {
-            5121 => binaryData.getUint8(at),
-            5123 => binaryData.getUint16(at, Endian.little),
-            _ => binaryData.getUint32(at, Endian.little),
-          };
-          if (number > maximum) maximum = number;
         }
       }
     }
@@ -262,14 +471,49 @@ void validateVrzGlb(
       type: type as String,
       maximum: maximum,
       absoluteMaximum: absoluteMaximum,
-      normalized: normalized as bool,
+      normalized: normalized,
+      isMeshopt: view.isMeshopt,
     ));
   }
+
   final materials = _list(json['materials'], 'materials');
   if (materials.length > 256) fail('material budget exceeded');
-  final texturedMaterials = <int>{};
-  for (final value in materials) {
-    final material = _map(value, 'material');
+  final materialsNeedingUv0 = <int>{};
+  final materialsNeedingUv1 = <int>{};
+  void checkTextureInfo(
+    Object? rawInfo,
+    String label,
+    int matIdx, {
+    bool allowScale = false,
+    bool allowStrength = false,
+  }) {
+    final texInfo = _map(rawInfo, label);
+    _index(texInfo['index'], textures.length, '$label.index');
+    final uv = _integer(texInfo['texCoord'] ?? 0, '$label.texCoord');
+    if (!allowV2Graphics && uv != 0) {
+      fail('embedded $label must use TEXCOORD_0');
+    }
+    if (uv != 0 && uv != 1) {
+      fail('$label texCoord must be 0 or 1');
+    }
+    if (uv == 0) {
+      materialsNeedingUv0.add(matIdx);
+    } else {
+      materialsNeedingUv1.add(matIdx);
+    }
+    if (allowScale && texInfo.containsKey('scale')) {
+      final scale = texInfo['scale'];
+      if (scale is! num || !scale.isFinite || scale < 0 || scale > 64) {
+        fail('invalid normalTexture scale');
+      }
+    }
+    if (allowStrength && texInfo.containsKey('strength')) {
+      _unitNumber(texInfo['strength']);
+    }
+  }
+
+  for (var matIdx = 0; matIdx < materials.length; matIdx++) {
+    final material = _map(materials[matIdx], 'material');
     if (material.containsKey('pbrMetallicRoughness')) {
       final pbr = _map(
         material['pbrMetallicRoughness'],
@@ -282,13 +526,50 @@ void validateVrzGlb(
         if (pbr.containsKey(key)) _unitNumber(pbr[key]);
       }
       if (pbr.containsKey('baseColorTexture')) {
-        final texture = _map(pbr['baseColorTexture'], 'baseColorTexture');
-        _index(texture['index'], textures.length, 'baseColorTexture.index');
-        if (_integer(texture['texCoord'] ?? 0, 'baseColorTexture.texCoord') !=
-            0) {
-          fail('embedded baseColorTexture must use TEXCOORD_0');
+        checkTextureInfo(pbr['baseColorTexture'], 'baseColorTexture', matIdx);
+      }
+      if (allowV2Graphics && pbr.containsKey('metallicRoughnessTexture')) {
+        checkTextureInfo(
+          pbr['metallicRoughnessTexture'],
+          'metallicRoughnessTexture',
+          matIdx,
+        );
+      }
+    }
+    if (allowV2Graphics) {
+      if (material.containsKey('normalTexture')) {
+        checkTextureInfo(
+          material['normalTexture'],
+          'normalTexture',
+          matIdx,
+          allowScale: true,
+        );
+      }
+      if (material.containsKey('occlusionTexture')) {
+        checkTextureInfo(
+          material['occlusionTexture'],
+          'occlusionTexture',
+          matIdx,
+          allowStrength: true,
+        );
+      }
+      if (material.containsKey('emissiveTexture')) {
+        checkTextureInfo(material['emissiveTexture'], 'emissiveTexture', matIdx);
+      }
+      if (material['extensions'] is Map) {
+        final ext = _map(material['extensions'], 'material.extensions');
+        if (ext.containsKey('KHR_materials_emissive_strength')) {
+          final es = _map(
+            ext['KHR_materials_emissive_strength'],
+            'KHR_materials_emissive_strength',
+          );
+          if (es.containsKey('emissiveStrength')) {
+            final s = es['emissiveStrength'];
+            if (s is! num || !s.isFinite || s < 0 || s > 1000) {
+              fail('invalid emissiveStrength');
+            }
+          }
         }
-        texturedMaterials.add(materials.indexOf(value));
       }
     }
     if (material.containsKey('emissiveFactor')) {
@@ -304,6 +585,7 @@ void validateVrzGlb(
       fail('invalid material alpha or culling setting');
     }
   }
+
   final meshes = _list(json['meshes'], 'meshes');
   if (meshes.isEmpty || meshes.length > 512) fail('mesh budget exceeded');
   final trianglesPerMesh = <int>[];
@@ -311,7 +593,14 @@ void validateVrzGlb(
   var primitiveCount = 0;
   for (final value in meshes) {
     final mesh = _map(value, 'mesh');
-    if (mesh.containsKey('weights')) fail('morph weights are unsupported');
+    if (mesh.containsKey('weights')) {
+      if (!allowV2Graphics) fail('morph weights are unsupported');
+      final weights = _list(mesh['weights'], 'mesh.weights');
+      if (weights.isEmpty || weights.length > VrzGlbV2Limits.maxMorphTargets) {
+        fail('morph weights budget exceeded');
+      }
+      _numbers(weights, weights.length, 100);
+    }
     final primitives = _list(mesh['primitives'], 'primitives');
     if (primitives.isEmpty) fail('mesh has no primitives');
     var triangles = 0;
@@ -319,24 +608,53 @@ void validateVrzGlb(
     for (final value in primitives) {
       if (++primitiveCount > 2048) fail('primitive budget exceeded');
       final primitive = _map(value, 'primitive');
-      if ((primitive['mode'] ?? 4) != 4 || primitive.containsKey('targets')) {
+      if ((primitive['mode'] ?? 4) != 4 ||
+          (!allowV2Graphics && primitive.containsKey('targets'))) {
         fail('only triangle meshes without morph targets are supported');
       }
       final attributes = _map(primitive['attributes'], 'attributes');
-      const allowed = {
-        'POSITION',
-        'NORMAL',
-        'TANGENT',
-        'TEXCOORD_0',
-        'COLOR_0',
-      };
+      final allowed = allowV2Graphics
+          ? const {
+              'POSITION',
+              'NORMAL',
+              'TANGENT',
+              'TEXCOORD_0',
+              'TEXCOORD_1',
+              'COLOR_0',
+              'JOINTS_0',
+              'WEIGHTS_0',
+            }
+          : const {'POSITION', 'NORMAL', 'TANGENT', 'TEXCOORD_0', 'COLOR_0'};
       if (attributes.keys.any((key) => !allowed.contains(key))) {
         fail('unsupported vertex attribute');
       }
       final position =
           info[_index(attributes['POSITION'], info.length, 'POSITION')];
-      if (position.type != 'VEC3' || position.component != 5126) {
+      if (position.type != 'VEC3' ||
+          (!allowV2Graphics && position.component != 5126) ||
+          (allowV2Graphics &&
+              !const [5120, 5121, 5122, 5123, 5126].contains(
+                position.component,
+              ))) {
         fail('POSITION must be float VEC3');
+      }
+      if (allowV2Graphics && primitive.containsKey('targets')) {
+        final targets = _list(primitive['targets'], 'primitive.targets');
+        if (targets.isEmpty || targets.length > VrzGlbV2Limits.maxMorphTargets) {
+          fail('morph target budget exceeded');
+        }
+        for (final rawTarget in targets) {
+          final target = _map(rawTarget, 'morphTarget');
+          for (final entry in target.entries) {
+            if (!const {'POSITION', 'NORMAL', 'TANGENT'}.contains(entry.key)) {
+              fail('unsupported morph target attribute');
+            }
+            final acc = info[_index(entry.value, info.length, entry.key)];
+            if (acc.count != position.count || acc.type != 'VEC3') {
+              fail('invalid morph target accessor');
+            }
+          }
+        }
       }
       for (final entry in attributes.entries) {
         final attribute = info[_index(entry.value, info.length, 'attribute')];
@@ -345,24 +663,37 @@ void validateVrzGlb(
         }
         final expected = switch (entry.key) {
           'POSITION' || 'NORMAL' => const ['VEC3'],
-          'TANGENT' => const ['VEC4'],
-          'TEXCOORD_0' => const ['VEC2'],
+          'TANGENT' || 'JOINTS_0' || 'WEIGHTS_0' => const ['VEC4'],
+          'TEXCOORD_0' || 'TEXCOORD_1' => const ['VEC2'],
           _ => const ['VEC3', 'VEC4'],
         };
         if (!expected.contains(attribute.type)) {
           fail('invalid vertex attribute shape');
         }
-        if ((entry.key == 'NORMAL' || entry.key == 'TANGENT') &&
+        if (!allowV2Graphics &&
+            (entry.key == 'NORMAL' || entry.key == 'TANGENT') &&
             attribute.component != 5126) {
           fail('normals and tangents must use floats');
         }
-        if (allowEmbeddedBaseColorTextures && entry.key == 'TEXCOORD_0') {
+        if (entry.key == 'JOINTS_0' &&
+            (!const [5121, 5123].contains(attribute.component) ||
+                attribute.normalized)) {
+          fail('JOINTS_0 must use non-normalized unsigned byte or short');
+        }
+        if (entry.key == 'WEIGHTS_0' &&
+            !((attribute.component == 5126 && !attribute.normalized) ||
+                (const [5121, 5123].contains(attribute.component) &&
+                    attribute.normalized))) {
+          fail('WEIGHTS_0 must use float or normalized unsigned integers');
+        }
+        if (allowTextures &&
+            (entry.key == 'TEXCOORD_0' || entry.key == 'TEXCOORD_1')) {
           if (!((attribute.component == 5126 && !attribute.normalized) ||
                   (const [5121, 5123].contains(attribute.component) &&
                       attribute.normalized)) ||
-              attribute.absoluteMaximum > 4096) {
+              (!attribute.isMeshopt && attribute.absoluteMaximum > 4096)) {
             fail(
-              'TEXCOORD_0 must use bounded float or normalized unsigned UVs',
+              '${entry.key} must use bounded float or normalized unsigned UVs',
             );
           }
         }
@@ -374,7 +705,7 @@ void validateVrzGlb(
         if (indices.type != 'SCALAR' ||
             ![5121, 5123, 5125].contains(indices.component) ||
             indices.normalized ||
-            indices.maximum >= position.count) {
+            (!indices.isMeshopt && indices.maximum >= position.count)) {
           fail('invalid triangle indices');
         }
         indexCount = indices.count;
@@ -388,9 +719,13 @@ void validateVrzGlb(
           materials.length,
           'material',
         );
-        if (texturedMaterials.contains(material) &&
+        if (materialsNeedingUv0.contains(material) &&
             !attributes.containsKey('TEXCOORD_0')) {
           fail('textured primitive requires TEXCOORD_0');
+        }
+        if (materialsNeedingUv1.contains(material) &&
+            !attributes.containsKey('TEXCOORD_1')) {
+          fail('textured primitive requires TEXCOORD_1');
         }
       }
       triangles += indexCount ~/ 3;
@@ -399,8 +734,79 @@ void validateVrzGlb(
     trianglesPerMesh.add(triangles);
     verticesPerMesh.add(vertices);
   }
+
   final nodes = _list(json['nodes'], 'nodes');
   if (nodes.isEmpty || nodes.length > 2048) fail('node budget exceeded');
+  final skins = _list(json['skins'], 'skins');
+  if (allowV2Graphics && skins.length > VrzGlbV2Limits.maxSkins) {
+    fail('skin budget exceeded');
+  }
+  for (final value in skins) {
+    final skin = _map(value, 'skin');
+    final joints = _list(skin['joints'], 'skin.joints');
+    if (joints.isEmpty || joints.length > 256) fail('invalid skin joints');
+    for (final joint in joints) {
+      _index(joint, nodes.length, 'skin.joint');
+    }
+    if (skin.containsKey('skeleton')) {
+      _index(skin['skeleton'], nodes.length, 'skin.skeleton');
+    }
+    if (skin.containsKey('inverseBindMatrices')) {
+      final ibm = info[
+        _index(
+          skin['inverseBindMatrices'],
+          info.length,
+          'skin.inverseBindMatrices',
+        )
+      ];
+      if (ibm.type != 'MAT4' ||
+          ibm.component != 5126 ||
+          ibm.count != joints.length) {
+        fail('invalid inverseBindMatrices accessor');
+      }
+    }
+  }
+
+  final animations = _list(json['animations'], 'animations');
+  if (allowV2Graphics && animations.length > VrzGlbV2Limits.maxAnimations) {
+    fail('animation budget exceeded');
+  }
+  for (final value in animations) {
+    final anim = _map(value, 'animation');
+    final samplers = _list(anim['samplers'], 'animation.samplers');
+    final channels = _list(anim['channels'], 'animation.channels');
+    if (samplers.isEmpty ||
+        samplers.length > 512 ||
+        channels.isEmpty ||
+        channels.length > 512) {
+      fail('invalid animation samplers or channels');
+    }
+    for (final rawSampler in samplers) {
+      final sampler = _map(rawSampler, 'animation.sampler');
+      final input = info[_index(sampler['input'], info.length, 'sampler.input')];
+      _index(sampler['output'], info.length, 'sampler.output');
+      if (input.type != 'SCALAR' || input.component != 5126) {
+        fail('animation input must be float SCALAR');
+      }
+    }
+    for (final rawChannel in channels) {
+      final channel = _map(rawChannel, 'animation.channel');
+      _index(channel['sampler'], samplers.length, 'channel.sampler');
+      final target = _map(channel['target'], 'channel.target');
+      if (target.containsKey('node')) {
+        _index(target['node'], nodes.length, 'channel.target.node');
+      }
+      if (!const {
+        'translation',
+        'rotation',
+        'scale',
+        'weights',
+      }.contains(target['path'])) {
+        fail('unsupported animation target path');
+      }
+    }
+  }
+
   final parents = <int>{};
   final children = <List<int>>[];
   final matrices = <vm.Matrix4>[];
@@ -408,10 +814,20 @@ void validateVrzGlb(
   var submittedVertices = 0;
   for (final value in nodes) {
     final node = _map(value, 'node');
-    if (node.containsKey('skin') ||
-        node.containsKey('camera') ||
-        node.containsKey('weights')) {
+    if (node.containsKey('camera') ||
+        (!allowV2Graphics &&
+            (node.containsKey('skin') || node.containsKey('weights')))) {
       fail('unsupported node feature');
+    }
+    if (allowV2Graphics && node.containsKey('skin')) {
+      _index(node['skin'], skins.length, 'node.skin');
+    }
+    if (allowV2Graphics && node.containsKey('weights')) {
+      final w = _list(node['weights'], 'node.weights');
+      if (w.isEmpty || w.length > VrzGlbV2Limits.maxMorphTargets) {
+        fail('node weights budget exceeded');
+      }
+      _numbers(w, w.length, 100);
     }
     if (node.containsKey('mesh')) {
       final mesh = _index(node['mesh'], meshes.length, 'node.mesh');
@@ -456,12 +872,12 @@ void validateVrzGlb(
   }
   if (submittedTriangles == 0 ||
       submittedTriangles > maxSubmittedTriangles ||
-      submittedVertices > 250000) {
+      submittedVertices > (allowV2Graphics ? 500000 : 250000)) {
     fail('submitted geometry budget exceeded');
   }
   final visited = <int>{};
   void visit(int index, vm.Matrix4 parent, int depth) {
-    if (depth > 32 || !visited.add(index)) {
+    if (depth > (allowV2Graphics ? 64 : 32) || !visited.add(index)) {
       fail('cyclic or excessively deep node graph');
     }
     final world = vm.Matrix4.copy(parent)..multiply(matrices[index]);
@@ -492,6 +908,82 @@ void validateVrzGlb(
       }
     }
   }
+  return (
+    submittedTriangles: submittedTriangles,
+    submittedVertices: submittedVertices,
+    estimatedVramBytes: uploadedVramBytes,
+  );
+}
+
+({int width, int height}) _validateKtx2Bytes(Uint8List bytes, int maxDim) {
+  if (bytes.length < 80) {
+    throw const FormatException('VRZ GLB: truncated KTX2 image.');
+  }
+  for (var i = 0; i < _ktx2Magic.length; i++) {
+    if (bytes[i] != _ktx2Magic[i]) {
+      throw const FormatException('VRZ GLB: invalid KTX2 magic.');
+    }
+  }
+  final view = ByteData.sublistView(bytes);
+  final width = view.getUint32(20, Endian.little);
+  final height = view.getUint32(24, Endian.little);
+  final depth = view.getUint32(28, Endian.little);
+  final faces = view.getUint32(36, Endian.little);
+  if (width < 1 ||
+      width > maxDim ||
+      height < 1 ||
+      height > maxDim ||
+      depth > 1 ||
+      faces != 1) {
+    throw const FormatException(
+      'VRZ GLB: KTX2 dimensions exceed 2D texture budget.',
+    );
+  }
+  return (width: width, height: height);
+}
+
+({int width, int height}) _validateJpegBytes(Uint8List bytes, int maxDim) {
+  if (bytes.length < 24 ||
+      bytes[0] != 0xFF ||
+      bytes[1] != 0xD8 ||
+      bytes[bytes.length - 2] != 0xFF ||
+      bytes[bytes.length - 1] != 0xD9) {
+    throw const FormatException('VRZ GLB: invalid JPEG envelope.');
+  }
+  var offset = 2;
+  while (offset + 4 <= bytes.length) {
+    if (bytes[offset] != 0xFF) {
+      offset++;
+      continue;
+    }
+    while (offset < bytes.length && bytes[offset] == 0xFF) {
+      offset++;
+    }
+    if (offset >= bytes.length) break;
+    final marker = bytes[offset++];
+    if (marker == 0xD9 || marker == 0xDA) break;
+    if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) continue;
+    if (offset + 2 > bytes.length) break;
+    final segLen = (bytes[offset] << 8) | bytes[offset + 1];
+    if (segLen < 2 || offset + segLen > bytes.length) {
+      throw const FormatException('VRZ GLB: truncated JPEG segment.');
+    }
+    if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2) {
+      if (segLen < 7) {
+        throw const FormatException('VRZ GLB: invalid JPEG SOF header.');
+      }
+      final height = (bytes[offset + 3] << 8) | bytes[offset + 4];
+      final width = (bytes[offset + 5] << 8) | bytes[offset + 6];
+      if (width < 1 || width > maxDim || height < 1 || height > maxDim) {
+        throw const FormatException(
+          'VRZ GLB: JPEG dimensions exceed texture budget.',
+        );
+      }
+      return (width: width, height: height);
+    }
+    offset += segLen;
+  }
+  throw const FormatException('VRZ GLB: JPEG missing baseline/progressive SOF.');
 }
 
 /// Preflight nesting before jsonDecode, then validate every numeric leaf.
@@ -538,30 +1030,49 @@ void _checkNumbers(Object? value) {
   }
 }
 
-void _checkTree(Object? value, {required bool allowEmbeddedBaseColorTextures}) {
+void _checkTree(
+  Object? value, {
+  required bool allowEmbeddedBaseColorTextures,
+  required bool allowV2Graphics,
+}) {
   if (value is Map) {
     for (final entry in value.entries) {
       if (entry.key == 'name' && entry.value is! String) {
         throw const FormatException('GLB names must be strings.');
       }
-      if (entry.key == 'uri' ||
-          ((entry.key as String).endsWith('Texture') &&
-              !(allowEmbeddedBaseColorTextures &&
-                  entry.key == 'baseColorTexture'))) {
+      final key = entry.key as String;
+      if (key == 'uri') {
         throw const FormatException(
           'VRZ GLB must not reference external resources or textures.',
         );
       }
-      if (entry.key == 'extensions') {
+      if (!allowV2Graphics &&
+          key.endsWith('Texture') &&
+          !(allowEmbeddedBaseColorTextures && key == 'baseColorTexture')) {
+        throw const FormatException(
+          'VRZ GLB must not reference external resources or textures.',
+        );
+      }
+      if (key == 'extensions') {
         final extensions = _map(entry.value, 'extensions');
-        if (extensions.keys.any((key) => key != 'KHR_materials_unlit') ||
-            extensions.values.any((item) => item is! Map || item.isNotEmpty)) {
-          throw const FormatException('Unsupported GLB extension.');
+        if (!allowV2Graphics) {
+          if (extensions.keys.any((ext) => ext != 'KHR_materials_unlit') ||
+              extensions.values.any((item) => item is! Map || item.isNotEmpty)) {
+            throw const FormatException('Unsupported GLB extension.');
+          }
+        } else {
+          if (extensions.keys.any(
+                (ext) => !VrzGlbV2Limits.allowedExtensions.contains(ext),
+              ) ||
+              extensions.values.any((item) => item is! Map)) {
+            throw const FormatException('Unsupported GLB extension.');
+          }
         }
       }
       _checkTree(
         entry.value,
         allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
+        allowV2Graphics: allowV2Graphics,
       );
     }
   } else if (value is List) {
@@ -569,6 +1080,7 @@ void _checkTree(Object? value, {required bool allowEmbeddedBaseColorTextures}) {
       _checkTree(
         item,
         allowEmbeddedBaseColorTextures: allowEmbeddedBaseColorTextures,
+        allowV2Graphics: allowV2Graphics,
       );
     }
   }

@@ -4,14 +4,15 @@ import 'package:vrlizate_world/vrlizate_world.dart';
 
 import 'vrz_glb.dart';
 
-/// Checks the portable static LOD subset after [validateVrzGlb] and before GPU
-/// import. All levels share one resource and remain under its existing total
-/// storage/triangle limits; selecting a level never grants another budget.
+/// Checks the portable LOD subset after [validateVrzGlb] and before GPU import.
+/// All levels share one resource and remain under its total storage/triangle
+/// limits; selecting a level never grants another budget.
 abstract final class VrlwLodProfile {
   static void validate(
     VrlwBundleIndex index,
-    Map<String, Uint8List> resources,
-  ) {
+    Map<String, Uint8List> resources, {
+    bool allowMovingLod = false,
+  }) {
     final lodModels = {
       for (final binding in index.prototypeBindings)
         if (binding.lods.isNotEmpty) binding.model,
@@ -24,7 +25,8 @@ abstract final class VrlwLodProfile {
         }
         continue;
       }
-      if (index.motions.any((m) => m.prototypeId == binding.prototypeId)) {
+      if (!allowMovingLod &&
+          index.motions.any((m) => m.prototypeId == binding.prototypeId)) {
         _fail('LOD currently requires a static prototype without motion.');
       }
       final document = documents.putIfAbsent(binding.model, () {
