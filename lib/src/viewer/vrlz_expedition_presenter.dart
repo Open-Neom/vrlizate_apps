@@ -534,8 +534,12 @@ final class VrlzPassportInputPolicy {
       final stick = data?['stick'];
       if (stick != VrGamepadStick.right && stick != 'right') {
         double axis(Object? v) => v is num && v.isFinite ? v.toDouble() : 0;
-        final x = event.active ? axis(data?['stickX'] ?? data?['x']) : 0.0;
-        final y = event.active ? axis(data?['stickY'] ?? data?['y']) : 0.0;
+        final dx = axis(data?['dpadX']);
+        final dy = axis(data?['dpadY']);
+        final sx = axis(data?['stickX'] ?? data?['x']);
+        final sy = axis(data?['stickY'] ?? data?['y']);
+        final x = event.active ? (dx.abs() > sx.abs() ? dx : sx) : 0.0;
+        final y = event.active ? (dy.abs() > sy.abs() ? dy : sy) : 0.0;
         // Hysteresis: a deliberate push selects once; return to center before
         // another page/control. Track while closed to avoid opening on a hold.
         if (x.abs() <= .25 && y.abs() <= .25) {
