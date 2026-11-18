@@ -215,7 +215,7 @@ final class VrlzWebGameManifest {
       _fail('Unsupported controller profile.');
     }
     final rawControls = json['controls'] ?? const <String, Object?>{};
-    if (rawControls is! Map<String, Object?> || rawControls.length > 14) {
+    if (rawControls is! Map<String, Object?> || rawControls.length > 16) {
       _fail('Invalid web input map.');
     }
     final controls = <String, String>{};
@@ -229,6 +229,8 @@ final class VrlzWebGameManifest {
       'Y',
       'L',
       'R',
+      'ZL',
+      'ZR',
       'GRIP',
       'START',
       'SELECT',
