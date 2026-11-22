@@ -85,8 +85,17 @@ class VrlwSceneAdapter {
   double _lightingAccumulator = 0;
   VrlwDayNightLighting? _dayNight;
   fs.GradientSkySource? _cycleSky;
+  final _waterController = VrAnimatedWaterController();
+  bool _fogFollowsDynamicHorizon = false;
+  double _baseFogSunInScatter = 0.22;
   late final _motionRuntime = VrlwMotionRuntime(activity);
   List<VrWorldEntity> _residentEntities = const [];
+
+  /// Number of water materials driven by zero-allocation GPU normal-map cycling.
+  int get animatedWaterMaterialCount => _waterController.materialCount;
+
+  /// Current active water normal-map ripple frame index.
+  int get activeWaterFrameIndex => _waterController.activeFrameIndex;
   static const maxMovingPrimitiveInstances = 16;
   static const maxVisibleEntities = 128;
   static const maxPrimitiveInstances = 256;
@@ -354,7 +363,7 @@ class VrlwSceneAdapter {
                 'Portable world requires nonempty triangle geometry.',
               );
             }
-            final material = materials.resolve(
+            var material = materials.resolve(
               primitive.material,
               baseColor: baseColor,
               normal: normal,
@@ -362,6 +371,30 @@ class VrlwSceneAdapter {
               emissive: emissive,
               occlusion: occlusion,
             );
+            final enableAnimatedWater =
+                reader.index.environment?.animatedWater ?? true;
+            if (enableAnimatedWater &&
+                normal == null &&
+                material is fs.PhysicallyBasedMaterial &&
+                material.normalTexture == null &&
+                VrWaterSurfaceClassifier.isWaterSurface(
+                  prototypeId: binding.prototypeId,
+                  nodeName: node.name,
+                  materialName: material.name,
+                )) {
+              final waterFrames = VrWaterNormalBank.ensureFrames();
+              if (waterFrames != null && waterFrames.isNotEmpty) {
+                // Clone via cache keyed on frame 0 so non-water meshes sharing
+                // the GLB source material stay completely untouched.
+                material = materials.resolve(
+                  material,
+                  normal: waterFrames.first,
+                );
+              }
+              if (material is fs.PhysicallyBasedMaterial) {
+                adapter._waterController.register(material);
+              }
+            }
             final matches = reader.index.motions.where(
               (m) =>
                   m.prototypeId == binding.prototypeId && m.node == node.name,
@@ -471,10 +504,13 @@ class VrlwSceneAdapter {
         ),
       );
       if (!isCurrent()) throw StateError('World opening cancelled.');
-      final fallbackSkybox =
+      final fallbackSkySource =
           authoredSky == null && cycle == null && fs.Scene.isReadyToRender
-          ? _fallbackSkyForWorld(reader.index.id, sunDir, sunColor)
+          ? _fallbackSkySourceForWorld(reader.index.id, sunDir, sunColor)
           : null;
+      final fallbackSkybox = fallbackSkySource == null
+          ? null
+          : fs.Skybox(fallbackSkySource);
       final sun = fs.DirectionalLight(
         direction: sunDir,
         color: sunColor,
@@ -489,11 +525,47 @@ class VrlwSceneAdapter {
         ..exposure = env?.exposure ?? 1.0
         ..toneMapping = fs.ToneMappingMode.pbrNeutral
         ..directionalLight = sun;
+      if (env?.environmentResource == null &&
+          fallbackSkySource != null &&
+          fs.Scene.isReadyToRender) {
+        // Outdoor worlds without an explicit environment.ktx2 bake real sky IBL
+        // from their biome gradient instead of reflecting a white studio box.
+        adapter.scene
+          ..skyEnvironment = fs.SkyEnvironment(
+            fallbackSkySource,
+            faceResolution: 64,
+            equirectWidth: 256,
+            refresh: fs.SkyEnvironmentRefresh.manual,
+          )
+          ..environmentIntensity = env?.environmentIntensity ?? 0.85;
+      }
+
+      // Apply explicit .vrlw atmospheric height-fog or biome-matched aerial haze.
+      final biomeFog = VrAtmosphericFogProfile.forWorldId(
+        reader.index.id,
+        horizonColor: fallbackSkySource?.horizonColor,
+      );
+      final fogProfile = VrAtmosphericFogProfile(
+        enabled: (env?.fogDensity ?? biomeFog.density) > 0.0,
+        color: env?.fogColor != null
+            ? vm.Vector3.array(env!.fogColor!)
+            : biomeFog.color,
+        density: env?.fogDensity ?? biomeFog.density,
+        maxOpacity: env?.fogMaxOpacity ?? biomeFog.maxOpacity,
+        heightFalloff: env?.fogHeightFalloff ?? biomeFog.heightFalloff,
+        cutoffDistance: env?.fogCutoffDistance ?? biomeFog.cutoffDistance,
+        skyColorInfluence:
+            env?.fogSkyColorInfluence ?? biomeFog.skyColorInfluence,
+        sunInScatter: env?.fogSunInScatter ?? biomeFog.sunInScatter,
+      );
+      fogProfile.applyTo(adapter.scene);
+      adapter._fogFollowsDynamicHorizon = env?.fogColor == null;
+      adapter._baseFogSunInScatter = fogProfile.sunInScatter;
+
       if (cycle != null) {
-        // Keep studio prefiltered radiance when the GPU is active so metallic
-        // trims, glass, and water preserve crisp specular reflections across
-        // the dynamic cycle; fall back to constant diffuse only in headless
-        // tests without an active GPU renderer.
+        // Keep studio/sky prefiltered radiance when the GPU is active so metals,
+        // glass, and water preserve crisp specular reflections across the cycle;
+        // fall back to constant diffuse only in headless tests without GPU.
         if (env?.environmentResource == null && !fs.Scene.isReadyToRender) {
           adapter.scene.environment = fs.EnvironmentMap.constantDiffuse(
             vm.Vector3(.22, .25, .32),
@@ -508,6 +580,15 @@ class VrlwSceneAdapter {
         if (authoredSky == null) {
           adapter._cycleSky = fs.GradientSkySource();
           adapter.scene.skybox = fs.Skybox(adapter._cycleSky!);
+          if (env?.environmentResource == null && fs.Scene.isReadyToRender) {
+            adapter.scene.skyEnvironment = fs.SkyEnvironment(
+              adapter._cycleSky!,
+              faceResolution: 64,
+              equirectWidth: 256,
+              refresh: fs.SkyEnvironmentRefresh.interval,
+              interval: const Duration(milliseconds: 2500),
+            );
+          }
         }
         adapter._updateLighting(force: true);
       }
@@ -667,6 +748,7 @@ class VrlwSceneAdapter {
 
   void _updateMotion(vm.Vector3 eye, double dt) {
     _motionRuntime.update(eye, dt);
+    _waterController.update(dt);
     _lightingAccumulator += dt.isFinite ? dt.clamp(0, .1) : 0;
     _updateLighting();
   }
@@ -689,6 +771,14 @@ class VrlwSceneAdapter {
       sky.horizonColor.setFrom(lighting.horizonColor);
       sky.groundColor.setFrom(lighting.groundColor);
     }
+    if (_fogFollowsDynamicHorizon) {
+      VrAtmosphericFogProfile.syncDynamicHorizon(
+        scene,
+        horizonColor: lighting.horizonColor,
+        sunAltitude: lighting.sunDirection.y,
+        baseSunInScatter: _baseFogSunInScatter,
+      );
+    }
     final sun = scene.directionalLight!;
     sun.direction.setFrom(lighting.lightDirection);
     sun.color.setFrom(lighting.lightColor);
@@ -697,7 +787,7 @@ class VrlwSceneAdapter {
     scene.exposure = lighting.exposure;
   }
 
-  static fs.Skybox _fallbackSkyForWorld(
+  static fs.GradientSkySource _fallbackSkySourceForWorld(
     String worldId,
     vm.Vector3 sunDir,
     vm.Vector3 sunColor,
@@ -744,15 +834,13 @@ class VrlwSceneAdapter {
       sharpness = 260.0;
     }
 
-    return fs.Skybox(
-      fs.GradientSkySource(
-        zenithColor: zenith,
-        horizonColor: horizon,
-        groundColor: ground,
-        sunDirection: -sunDir,
-        sunColor: sunColor * sunScale,
-        sunSharpness: sharpness,
-      ),
+    return fs.GradientSkySource(
+      zenithColor: zenith,
+      horizonColor: horizon,
+      groundColor: ground,
+      sunDirection: -sunDir,
+      sunColor: sunColor * sunScale,
+      sunSharpness: sharpness,
     );
   }
 
@@ -934,6 +1022,7 @@ class VrlwSceneAdapter {
     _residentEntities = const [];
     _lod.clear();
     _motionRuntime.clear();
+    _waterController.clear();
   }
 }
 
