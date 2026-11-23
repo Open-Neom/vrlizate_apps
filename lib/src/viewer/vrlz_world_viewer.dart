@@ -1682,7 +1682,7 @@ class _WorldPlayerState extends State<_WorldPlayer>
                   onGazeSelect: _select,
                   locomotionEnabled: !_passportOpen,
                   lookInputEnabled: !_passportOpen,
-                  showHomeControl: !_passportOpen,
+                  showHomeControl: false,
                 ),
               if (_loading) const Center(child: CircularProgressIndicator()),
               if (_error != null)
