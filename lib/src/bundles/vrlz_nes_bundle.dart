@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 
 import 'vrlz_nes_manifest.dart';
@@ -199,13 +198,10 @@ final class VrlzNesBundle {
       'license': license,
       'sourceUrl': sourceUrl,
     });
-    final metadata = utf8.encode(jsonEncode(manifest.toJson()));
-    final archive = Archive()
-      ..add(ArchiveFile.noCompress('manifest.json', metadata.length, metadata))
-      ..add(ArchiveFile.noCompress('game.nes', romBytes.length, romBytes));
-    final encoded = ZipEncoder().encodeBytes(
-      archive,
-      modified: DateTime.utc(2000),
+    final metadata = Uint8List.fromList(utf8.encode(jsonEncode(manifest.toJson())));
+    final encoded = writeVrzStoreZip(
+      {'manifest.json': metadata, 'game.nes': romBytes},
+      maxBytes,
     );
     decode(encoded);
     return encoded;

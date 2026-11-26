@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 
 import 'vrz_glb.dart';
@@ -73,13 +72,10 @@ final class VrzBundle {
       throw const FormatException('Scene exceeds the VRZ size budget.');
     }
     final manifest = VrzManifest.fromJson(manifestJson);
-    final metadata = utf8.encode(jsonEncode(manifest.toJson()));
-    final archive = Archive()
-      ..add(ArchiveFile.noCompress('manifest.json', metadata.length, metadata))
-      ..add(ArchiveFile.noCompress('scene.glb', sceneBytes.length, sceneBytes));
-    final encoded = ZipEncoder().encodeBytes(
-      archive,
-      modified: DateTime.utc(2000),
+    final metadata = Uint8List.fromList(utf8.encode(jsonEncode(manifest.toJson())));
+    final encoded = writeVrzStoreZip(
+      {'manifest.json': metadata, 'scene.glb': sceneBytes},
+      maxBytes,
     );
     decode(encoded);
     return encoded;

@@ -584,6 +584,13 @@ packages:
       relative: true
     source: path
     version: "1.0.0"
+  vrlizate_mudras:
+    dependency: "direct overridden"
+    description:
+      path: "../vrlizate_mudras"
+      relative: true
+    source: path
+    version: "1.0.0"
   vrlizate_physics:
     dependency: "direct main"
     description:

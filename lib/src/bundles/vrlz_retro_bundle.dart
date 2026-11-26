@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 
 import 'vrlz_retro_level.dart';
@@ -59,13 +58,13 @@ final class VrlzRetroBundle {
       'sha256': {'level.json': sha256.convert(payload).toString()},
       'license': license,
     });
-    final metadata = utf8.encode(jsonEncode(manifest.toJson()));
-    final archive = Archive()
-      ..add(ArchiveFile.noCompress('manifest.json', metadata.length, metadata))
-      ..add(ArchiveFile.noCompress('level.json', payload.length, payload));
-    final encoded = ZipEncoder().encodeBytes(
-      archive,
-      modified: DateTime.utc(2000),
+    final metadata = Uint8List.fromList(utf8.encode(jsonEncode(manifest.toJson())));
+    final encoded = writeVrzStoreZip(
+      {
+        'manifest.json': metadata,
+        'level.json': Uint8List.fromList(payload),
+      },
+      maxBytes,
     );
     decode(encoded);
     return encoded;
