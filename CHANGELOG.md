@@ -1,5 +1,7 @@
-## 1.0.0 - 2026-11-06
+## 1.0.0 - 2026-11-25
 
+- Encode `VrzBundle`, `VrlzRetroBundle`, and `VrlzNesBundle` `.vrlz` archives using the deterministic STORE-only `writeVrzStoreZip` writer instead of `archive`'s `ZipEncoder` (eliminating `archive >= 4.4` extra-field rejections in strict `readVrzZip`), and register `vrlizate_mudras` in `pubspec_overrides.yaml`.
+- Enable atmospheric height-fog, sky-matched IBL (`SkyEnvironment`), and automatic animated Fresnel water in `VrlwSceneAdapter`, and hide the floating 3D HOME button in `VrlzWorldViewer` (Hold-`B` returns home).
 - Separate fast magic/digest preflight (`VrPackageIntegrityVerifier.verifySignatureAndChecksum`) from full structural and SHA-256 container validation (`verifyBundle` / `validateBundleOrThrow` via `VrlzPackage.decode` and `VrlwBundleCodec`), pin `archive: 4.3.0`, and document embedded `.vrlw` memory expansion vs `VrlwHttpSource` `HTTP 206` streaming (`A09`, `A10`).
 - Promover `vrlizate_apps` a la versión estable `1.0.0` bajo la estructura modular Open Neom (`lib/utils/constants/`, `lib/utils/enums/`, `lib/domain/models/`, `lib/domain/services/`).
 - Añadir perfil de paquetes WebGame v5 (`vrlizate.webgame.v1`), `VrlzWebGameManifest`, `VrlzWebGameBundle` y `VrlzWebGameCache` para empaquetar, verificar por SHA-256 y servir en caché juegos HTML5/WebGL open-source dentro de `.vrlz`.
